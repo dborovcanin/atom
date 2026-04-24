@@ -1,0 +1,2035 @@
+openapi: 3.0.3
+
+info:
+  title: Atom
+  version: 0.1.0
+  description: |
+    Identity and Authorization service for IoT and cloud-native systems.
+
+    All endpoints except `GET /health`, `POST /auth/login`, and
+    `GET /.well-known/jwks.json` require a Bearer token:
+
+    ```
+    Authorization: Bearer <token>
+    ```
+
+    Two token types are accepted:
+    - **JWT** (`eyJ...`) — returned by `/auth/login`, short-lived (default 1 h)
+    - **API key** (`atom_...`) — long-lived, created per entity
+
+    Endpoints marked **RequireManage** additionally require the caller to hold an
+    `allow` + `scope=all` policy binding covering the `manage` capability.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - BearerAuth: []
+
+# ---------------------------------------------------------------------------
+# Reusable components
+# ---------------------------------------------------------------------------
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: JWT (`eyJ...`) or API key (`atom_<id>_<secret>`)
+
+  # ── Schemas ──────────────────────────────────────────────────────────────
+
+  schemas:
+
+    # Enumerations
+    EntityKind:
+      type: string
+      enum: [human, device, service, workload, application]
+
+    EntityStatus:
+      type: string
+      enum: [active, inactive, suspended]
+      default: active
+
+    CredentialKind:
+      type: string
+      enum: [password, api_key, certificate]
+
+    CredentialStatus:
+      type: string
+      enum: [active, revoked]
+
+    SubjectKind:
+      type: string
+      enum: [entity, group]
+
+    GrantKind:
+      type: string
+      enum: [capability, role]
+
+    ScopeKind:
+      type: string
+      enum: [all, resource_kind, resource]
+      description: |
+        - `all` — applies to every resource
+        - `resource_kind` — applies to all resources of a given kind (`scope_ref` = kind name)
+        - `resource` — applies to one specific resource (`scope_ref` = resource UUID)
+
+    Effect:
+      type: string
+      enum: [allow, deny]
+      default: allow
+
+    # Shared error envelope
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: not found
+
+    # ── Auth ───────────────────────────────────────────────────────────────
+
+    LoginRequest:
+      type: object
+      required: [identifier, secret]
+      properties:
+        identifier:
+          type: string
+          example: alice
+        secret:
+          type: string
+          format: password
+        kind:
+          $ref: '#/components/schemas/CredentialKind'
+          default: password
+
+    LoginResponse:
+      type: object
+      required: [token, entity_id, session_id, expires_at]
+      properties:
+        token:
+          type: string
+          description: ES256-signed JWT
+        entity_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+
+    Session:
+      type: object
+      required: [id, entity_id, expires_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        entity_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Jwk:
+      type: object
+      required: [kty, crv, x, y, kid, use, alg]
+      properties:
+        kty:
+          type: string
+          example: EC
+        crv:
+          type: string
+          example: P-256
+        x:
+          type: string
+          description: Base64url-encoded x coordinate
+        y:
+          type: string
+          description: Base64url-encoded y coordinate
+        kid:
+          type: string
+          description: Key ID — matches the `kid` header in signed JWTs
+        use:
+          type: string
+          example: sig
+        alg:
+          type: string
+          example: ES256
+
+    JwksResponse:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/Jwk'
+          description: Primary key first, standby key second (if present)
+
+    # ── Entities ───────────────────────────────────────────────────────────
+
+    Entity:
+      type: object
+      required: [id, kind, name, status, attributes, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          $ref: '#/components/schemas/EntityKind'
+        name:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          $ref: '#/components/schemas/EntityStatus'
+        attributes:
+          type: object
+          description: Arbitrary JSONB metadata, usable in ABAC conditions
+          example: {"department": "engineering", "env": "prod"}
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateEntity:
+      type: object
+      required: [kind, name]
+      properties:
+        kind:
+          $ref: '#/components/schemas/EntityKind'
+        name:
+          type: string
+          example: sensor-01
+        tenant_id:
+          type: string
+          format: uuid
+        attributes:
+          type: object
+
+    UpdateEntity:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/EntityStatus'
+        attributes:
+          type: object
+          description: Replaces all existing attributes when provided
+
+    EntityList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entity'
+        total:
+          type: integer
+          description: Total count across all pages
+
+    # ── Credentials ────────────────────────────────────────────────────────
+
+    Credential:
+      type: object
+      required: [id, kind, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          $ref: '#/components/schemas/CredentialKind'
+        identifier:
+          type: string
+          nullable: true
+          description: Username (password cred) or key prefix (API key)
+        status:
+          $ref: '#/components/schemas/CredentialStatus'
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    CredentialList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+
+    CreateApiKey:
+      type: object
+      properties:
+        expires_at:
+          type: string
+          format: date-time
+          description: Omit for no expiry
+        description:
+          type: string
+          example: device-01 production key
+
+    ApiKeyResponse:
+      type: object
+      required: [credential_id, key]
+      properties:
+        credential_id:
+          type: string
+          format: uuid
+        key:
+          type: string
+          description: >
+            Full API key — format `atom_<32-hex-id>_<64-hex-secret>`.
+            Shown exactly once. Store securely.
+          example: atom_0a1b2c3d...
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ── Groups ─────────────────────────────────────────────────────────────
+
+    Group:
+      type: object
+      required: [id, name, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateGroup:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: floor-sensors
+        tenant_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+
+    GroupList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Group'
+        total:
+          type: integer
+
+    AddMember:
+      type: object
+      required: [entity_id]
+      properties:
+        entity_id:
+          type: string
+          format: uuid
+
+    MemberList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entity'
+
+    GroupIdList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    # ── Ownerships ─────────────────────────────────────────────────────────
+
+    Ownership:
+      type: object
+      required: [owner_id, owned_id, relation, created_at]
+      properties:
+        owner_id:
+          type: string
+          format: uuid
+        owned_id:
+          type: string
+          format: uuid
+        relation:
+          type: string
+          default: owner
+        created_at:
+          type: string
+          format: date-time
+
+    CreateOwnership:
+      type: object
+      required: [owned_id]
+      properties:
+        owned_id:
+          type: string
+          format: uuid
+        relation:
+          type: string
+          default: owner
+
+    OwnedList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entity'
+
+    # ── Resources ──────────────────────────────────────────────────────────
+
+    Resource:
+      type: object
+      required: [id, kind, attributes, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          example: channel
+          description: Free-form kind string — e.g. channel, device, workspace
+        name:
+          type: string
+          nullable: true
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        owner_id:
+          type: string
+          format: uuid
+          nullable: true
+        attributes:
+          type: object
+          description: Arbitrary JSONB metadata, usable in ABAC conditions
+          example: {"env": "prod", "classification": "confidential"}
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateResource:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          example: channel
+        name:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+        owner_id:
+          type: string
+          format: uuid
+        attributes:
+          type: object
+
+    UpdateResource:
+      type: object
+      properties:
+        name:
+          type: string
+        attributes:
+          type: object
+
+    ResourceList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Resource'
+        total:
+          type: integer
+
+    # ── Roles ──────────────────────────────────────────────────────────────
+
+    Role:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    CreateRole:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: channel-publisher
+        tenant_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+
+    RoleList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        total:
+          type: integer
+
+    AddRoleCapability:
+      type: object
+      required: [capability_id]
+      properties:
+        capability_id:
+          type: string
+          format: uuid
+
+    # ── Capabilities ───────────────────────────────────────────────────────
+
+    Capability:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: publish
+        resource_kind:
+          type: string
+          nullable: true
+          description: >
+            Scopes this capability to a specific resource kind.
+            `null` means the capability applies to all resource kinds.
+        description:
+          type: string
+          nullable: true
+
+    CreateCapability:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        resource_kind:
+          type: string
+          description: Omit to create a capability that applies to all resource kinds
+        description:
+          type: string
+
+    CapabilityList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Capability'
+
+    # ── Policy bindings ────────────────────────────────────────────────────
+
+    PolicyBinding:
+      type: object
+      required: [id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, effect, conditions, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        subject_kind:
+          $ref: '#/components/schemas/SubjectKind'
+        subject_id:
+          type: string
+          format: uuid
+        grant_kind:
+          $ref: '#/components/schemas/GrantKind'
+        grant_id:
+          type: string
+          format: uuid
+        scope_kind:
+          $ref: '#/components/schemas/ScopeKind'
+        scope_ref:
+          type: string
+          nullable: true
+          description: Kind name or resource UUID depending on `scope_kind`
+        effect:
+          $ref: '#/components/schemas/Effect'
+        conditions:
+          type: object
+          description: >
+            Flat dot-path ABAC conditions. All entries must match (AND logic).
+            Keys: `entity.attributes.<k>`, `resource.attributes.<k>`, `context.<k>`.
+            Empty object `{}` means no conditions.
+          example: {"resource.attributes.env": "prod", "context.ip_trusted": "true"}
+        created_at:
+          type: string
+          format: date-time
+
+    CreatePolicyBinding:
+      type: object
+      required: [subject_kind, subject_id, grant_kind, grant_id, scope_kind]
+      properties:
+        subject_kind:
+          $ref: '#/components/schemas/SubjectKind'
+        subject_id:
+          type: string
+          format: uuid
+        grant_kind:
+          $ref: '#/components/schemas/GrantKind'
+        grant_id:
+          type: string
+          format: uuid
+        scope_kind:
+          $ref: '#/components/schemas/ScopeKind'
+        scope_ref:
+          type: string
+          description: >
+            For `scope_kind=resource`: resource UUID.
+            For `scope_kind=resource_kind`: kind name string.
+            For `scope_kind=all`: omit.
+        effect:
+          $ref: '#/components/schemas/Effect'
+        conditions:
+          type: object
+          example: {}
+
+    PolicyList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyBinding'
+        total:
+          type: integer
+
+    # ── Authorization check ────────────────────────────────────────────────
+
+    AuthzRequest:
+      type: object
+      required: [subject_id, action, resource_id]
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+          description: Capability name to check
+          example: publish
+        resource_id:
+          type: string
+          format: uuid
+        context:
+          type: object
+          description: >
+            Optional extra fields injected into the ABAC evaluation context
+            under the `context` key. Values can be any JSON type.
+          example: {"ip_trusted": "true"}
+
+    AuthzResponse:
+      type: object
+      required: [allowed, reason]
+      properties:
+        allowed:
+          type: boolean
+        reason:
+          type: string
+          enum:
+            - allowed
+            - no matching allow policy
+            - subject not found
+            - subject is not active
+            - resource not found
+            - "unknown action '<name>'"
+            - "explicitly denied by policy <id>"
+
+  # ── Reusable responses ───────────────────────────────────────────────────
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: missing Authorization header
+
+    Forbidden:
+      description: Caller lacks `manage` scope=all
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: forbidden
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: not found
+
+    Conflict:
+      description: Already exists (unique constraint)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: already exists
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+
+  # ── Health ─────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is healthy and database is reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  # ── JWKS ───────────────────────────────────────────────────────────────
+
+  /.well-known/jwks.json:
+    get:
+      operationId: getJwks
+      summary: JWKS public keys
+      description: >
+        Returns the active ES256 public keys for external JWT verification.
+        Always includes the primary key and the standby key (if present).
+        Cache with a short TTL; re-fetch on unknown `kid`.
+      tags: [Auth]
+      security: []
+      responses:
+        "200":
+          description: JWKS
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JwksResponse'
+
+  # ── Auth ───────────────────────────────────────────────────────────────
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Authenticate with a password and receive a JWT
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              identifier: alice
+              secret: s3cr3t
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the current session
+      description: Immediately invalidates the JWT associated with the current session.
+      tags: [Auth]
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/sessions/{id}:
+    get:
+      operationId: getSession
+      summary: Get session details
+      tags: [Auth]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /auth/keys/rotate:
+    post:
+      operationId: rotateKeys
+      summary: Rotate ES256 signing keys
+      description: >
+        **RequireManage.** Generates a new primary key, demotes the current primary to standby,
+        and retires the previous standby — all in a single transaction.
+        Outstanding tokens remain valid under the standby key until they expire.
+        The in-process key store is updated immediately; no restart required.
+      tags: [Auth]
+      responses:
+        "204":
+          description: Keys rotated
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # ── Entities ───────────────────────────────────────────────────────────
+
+  /entities:
+    get:
+      operationId: listEntities
+      summary: List entities
+      tags: [Entities]
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/EntityKind'
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EntityStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Paginated entity list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntityList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createEntity
+      summary: Create an entity
+      tags: [Entities]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEntity'
+            example:
+              kind: device
+              name: sensor-01
+              attributes:
+                firmware: "2.1.0"
+      responses:
+        "201":
+          description: Entity created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entity'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          $ref: '#/components/responses/Conflict'
+
+  /entities/{id}:
+    get:
+      operationId: getEntity
+      summary: Get an entity
+      tags: [Entities]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entity'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      operationId: updateEntity
+      summary: Update an entity
+      description: All fields are optional; only provided fields are updated (COALESCE semantics).
+      tags: [Entities]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEntity'
+      responses:
+        "200":
+          description: Updated entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entity'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteEntity
+      summary: Delete an entity
+      description: >
+        An entity may always delete itself.
+        Deleting any other entity requires `manage` scope=all (**RequireManage**).
+      tags: [Entities]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ── Credentials ────────────────────────────────────────────────────────
+
+  /entities/{id}/credentials/password:
+    post:
+      operationId: createPassword
+      summary: Set a password credential
+      description: Hashed with argon2. An entity may have multiple password credentials.
+      tags: [Credentials]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  format: password
+      responses:
+        "204":
+          description: Password set
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /entities/{id}/credentials/api-keys:
+    post:
+      operationId: createApiKey
+      summary: Create an API key
+      description: >
+        The full key (`atom_<id>_<secret>`) is returned exactly once and never
+        stored in plaintext. Store it securely immediately.
+      tags: [Credentials]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKey'
+      responses:
+        "201":
+          description: API key created — store the `key` value immediately
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /entities/{id}/credentials:
+    get:
+      operationId: listCredentials
+      summary: List credentials for an entity
+      description: Returns metadata only — no secret hashes or plaintext secrets.
+      tags: [Credentials]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Credential list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /entities/{entity_id}/credentials/{cred_id}:
+    delete:
+      operationId: revokeCredential
+      summary: Revoke a credential
+      description: Sets status to `revoked`. Takes effect on the next use of that credential.
+      tags: [Credentials]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: cred_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Credential revoked
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ── Groups ─────────────────────────────────────────────────────────────
+
+  /groups:
+    get:
+      operationId: listGroups
+      summary: List groups
+      tags: [Groups]
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Group list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createGroup
+      summary: Create a group
+      tags: [Groups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGroup'
+      responses:
+        "201":
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          $ref: '#/components/responses/Conflict'
+
+  /groups/{id}:
+    get:
+      operationId: getGroup
+      summary: Get a group
+      tags: [Groups]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteGroup
+      summary: Delete a group
+      tags: [Groups]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /groups/{id}/members:
+    get:
+      operationId: listGroupMembers
+      summary: List group members
+      tags: [Groups]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Member entities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: addGroupMember
+      summary: Add an entity to a group
+      tags: [Groups]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMember'
+      responses:
+        "204":
+          description: Member added
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /groups/{group_id}/members/{entity_id}:
+    delete:
+      operationId: removeGroupMember
+      summary: Remove an entity from a group
+      tags: [Groups]
+      parameters:
+        - name: group_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Member removed
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /entities/{id}/groups:
+    get:
+      operationId: getEntityGroups
+      summary: List groups an entity belongs to
+      tags: [Groups]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Group IDs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupIdList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Ownerships ─────────────────────────────────────────────────────────
+
+  /entities/{id}/owned:
+    get:
+      operationId: listOwned
+      summary: List entities owned by this entity
+      tags: [Ownerships]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Owned entities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnedList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: addOwnership
+      summary: Establish an ownership relationship
+      tags: [Ownerships]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOwnership'
+      responses:
+        "201":
+          description: Ownership created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ownership'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /entities/{owner_id}/owned/{owned_id}:
+    delete:
+      operationId: removeOwnership
+      summary: Remove an ownership relationship
+      tags: [Ownerships]
+      parameters:
+        - name: owner_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: owned_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Removed
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Resources ──────────────────────────────────────────────────────────
+
+  /resources:
+    get:
+      operationId: listResources
+      summary: List resources
+      tags: [Resources]
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Resource list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createResource
+      summary: Register a resource
+      tags: [Resources]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateResource'
+            example:
+              kind: channel
+              name: telemetry
+              attributes:
+                env: prod
+      responses:
+        "201":
+          description: Resource created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resource'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /resources/{id}:
+    get:
+      operationId: getResource
+      summary: Get a resource
+      tags: [Resources]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resource'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      operationId: updateResource
+      summary: Update a resource
+      tags: [Resources]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateResource'
+      responses:
+        "200":
+          description: Updated resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resource'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteResource
+      summary: Delete a resource
+      tags: [Resources]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ── Roles ──────────────────────────────────────────────────────────────
+
+  /roles:
+    get:
+      operationId: listRoles
+      summary: List roles
+      tags: [Roles]
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Role list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createRole
+      summary: Create a role
+      tags: [Roles]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRole'
+      responses:
+        "201":
+          description: Role created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          $ref: '#/components/responses/Conflict'
+
+  /roles/{id}:
+    get:
+      operationId: getRole
+      summary: Get a role
+      tags: [Roles]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteRole
+      summary: Delete a role
+      tags: [Roles]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /roles/{id}/capabilities:
+    get:
+      operationId: getRoleCapabilities
+      summary: List capabilities in a role
+      tags: [Roles]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Capability list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: addRoleCapability
+      summary: Add a capability to a role
+      tags: [Roles]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddRoleCapability'
+      responses:
+        "204":
+          description: Added
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /roles/{role_id}/capabilities/{cap_id}:
+    delete:
+      operationId: removeRoleCapability
+      summary: Remove a capability from a role
+      tags: [Roles]
+      parameters:
+        - name: role_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: cap_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Removed
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Capabilities ───────────────────────────────────────────────────────
+
+  /capabilities:
+    get:
+      operationId: listCapabilities
+      summary: List capabilities
+      description: Passing `resource_kind` returns capabilities for that kind plus universal ones (`resource_kind=null`).
+      tags: [Capabilities]
+      parameters:
+        - name: resource_kind
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Capability list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createCapability
+      summary: Create a capability
+      description: "**RequireManage.**"
+      tags: [Capabilities]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCapability'
+      responses:
+        "201":
+          description: Capability created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capability'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "409":
+          $ref: '#/components/responses/Conflict'
+
+  /capabilities/{id}:
+    get:
+      operationId: getCapability
+      summary: Get a capability
+      tags: [Capabilities]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Capability
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capability'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteCapability
+      summary: Delete a capability
+      description: "**RequireManage.**"
+      tags: [Capabilities]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ── Policy bindings ────────────────────────────────────────────────────
+
+  /policies:
+    get:
+      operationId: listPolicies
+      summary: List policy bindings
+      tags: [Policies]
+      parameters:
+        - name: subject_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: subject_kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/SubjectKind'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Policy binding list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createPolicy
+      summary: Create a policy binding
+      description: "**RequireManage.**"
+      tags: [Policies]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyBinding'
+            examples:
+              rbac:
+                summary: Role grant over a resource kind
+                value:
+                  subject_kind: entity
+                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
+                  grant_kind: role
+                  grant_id: "7c4b7f1e-0000-0000-0000-000000000001"
+                  scope_kind: resource_kind
+                  scope_ref: channel
+                  effect: allow
+              abac:
+                summary: Capability with ABAC condition
+                value:
+                  subject_kind: entity
+                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
+                  grant_kind: capability
+                  grant_id: "7c4b7f1e-0000-0000-0000-000000000002"
+                  scope_kind: resource_kind
+                  scope_ref: secret
+                  effect: allow
+                  conditions:
+                    "resource.attributes.env": "prod"
+              deny:
+                summary: Explicit deny for a specific entity
+                value:
+                  subject_kind: entity
+                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
+                  grant_kind: role
+                  grant_id: "7c4b7f1e-0000-0000-0000-000000000001"
+                  scope_kind: all
+                  effect: deny
+      responses:
+        "201":
+          description: Policy binding created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyBinding'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /policies/{id}:
+    get:
+      operationId: getPolicy
+      summary: Get a policy binding
+      tags: [Policies]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Policy binding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyBinding'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deletePolicy
+      summary: Delete a policy binding
+      description: "**RequireManage.**"
+      tags: [Policies]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ── Authorization check ────────────────────────────────────────────────
+
+  /authz/check:
+    post:
+      operationId: authzCheck
+      summary: Authorization decision (PDP)
+      description: |
+        The primary endpoint for downstream services. Call it on every protected operation.
+
+        **Algorithm (in order):**
+        1. Load entity — must exist and be `active`
+        2. Load resource — must exist
+        3. Resolve capability by `action` name
+        4. Load all policy bindings for the entity (direct + via group membership)
+        5. Batch-load role capabilities for all role-grant bindings
+        6. For each binding: check scope → check grant → evaluate ABAC conditions
+        7. First `deny` match → immediately return `allowed: false`
+        8. Any `allow` match → `allowed: true`; otherwise → `allowed: false`
+      tags: [Authorization]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthzRequest'
+            examples:
+              simple:
+                summary: RBAC check — device publishing to a channel
+                value:
+                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
+                  action: publish
+                  resource_id: "7c4b7f1e-4b9e-4b7f-8b4b-7f1e4b9e4b7f"
+              withContext:
+                summary: ABAC check — context carries runtime attributes
+                value:
+                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
+                  action: read
+                  resource_id: "7c4b7f1e-4b9e-4b7f-8b4b-7f1e4b9e4b7f"
+                  context:
+                    ip_trusted: "true"
+      responses:
+        "200":
+          description: Authorization decision — always 200, check `allowed` field
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthzResponse'
+              examples:
+                allowed:
+                  value:
+                    allowed: true
+                    reason: allowed
+                noPolicy:
+                  value:
+                    allowed: false
+                    reason: no matching allow policy
+                explicitDeny:
+                  value:
+                    allowed: false
+                    reason: "explicitly denied by policy 550e8400-e29b-41d4-a716-446655440000"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+tags:
+  - name: Health
+    description: Service liveness
+  - name: Auth
+    description: Login, logout, session management, JWKS, and key rotation
+  - name: Entities
+    description: Principal management — humans, devices, services, workloads, applications
+  - name: Credentials
+    description: Password and API key credential lifecycle
+  - name: Groups
+    description: Named collections of entities used as policy subjects
+  - name: Ownerships
+    description: Parent–child relationships between entities
+  - name: Resources
+    description: Protected resources registered for authorization decisions
+  - name: Roles
+    description: Named capability bundles for RBAC
+  - name: Capabilities
+    description: Atomic permissions — seeded defaults plus custom additions
+  - name: Policies
+    description: Policy bindings — the core authorization primitive (RBAC + ABAC)
+  - name: Authorization
+    description: Runtime authorization decisions from the PDP

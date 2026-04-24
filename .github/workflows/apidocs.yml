@@ -1,0 +1,63 @@
+name: API Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "proto/**"
+      - "apidocs/**"
+      - "buf.yaml"
+      - "buf.gen.yaml"
+      - ".github/workflows/apidocs.yml"
+  pull_request:
+    branches: [main]
+
+jobs:
+  proto:
+    name: Lint proto + check generated docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install buf
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: buf lint
+        run: buf lint
+
+      - name: Install Go (for protoc-gen-doc)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install protoc-gen-doc
+        run: go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@latest
+
+      - name: Generate proto docs
+        run: buf generate
+
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code apidocs/grpc-reference.md; then
+            echo ""
+            echo "apidocs/grpc-reference.md is out of date."
+            echo "Run 'buf generate' locally and commit the result."
+            exit 1
+          fi
+
+  openapi:
+    name: Validate OpenAPI spec
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Redocly CLI
+        run: npm install -g @redocly/cli@latest
+
+      - name: Validate openapi.yaml
+        run: redocly lint apidocs/openapi.yaml

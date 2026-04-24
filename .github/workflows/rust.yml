@@ -6,6 +6,8 @@ on:
     paths:
       - "src/**"
       - "migrations/**"
+      - "proto/**"
+      - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rust.yml"

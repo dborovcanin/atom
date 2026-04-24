@@ -1,0 +1,8 @@
+version: v2
+
+plugins:
+  # Generates apidocs/grpc-reference.md from the proto.
+  # Requires protoc-gen-doc: go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@latest
+  - local: protoc-gen-doc
+    out: apidocs
+    opt: markdown,grpc-reference.md

@@ -24,7 +24,7 @@ Built for [Magistrala](https://github.com/absmach/magistrala) IoT platform, but 
 ```bash
 # 1. Copy and edit config
 cp .env.example .env
-# set a real JWT_SECRET (32+ random chars)
+# set ADMIN_SECRET on first boot to create the admin password
 
 # 2. Start Postgres
 docker-compose up postgres -d
@@ -45,9 +45,11 @@ The service starts on `http://localhost:8080`.
 | Variable         | Default                                    | Description                     |
 |------------------|--------------------------------------------|---------------------------------|
 | `DATABASE_URL`   | *(required)*                               | Postgres connection string      |
-| `LISTEN_ADDR`    | `0.0.0.0:8080`                             | Bind address                    |
-| `JWT_SECRET`     | *(required)*                               | HS256 signing secret (32+ chars)|
+| `LISTEN_ADDR`    | `0.0.0.0:8080`                             | HTTP bind address               |
+| `GRPC_ADDR`      | `0.0.0.0:8081`                             | gRPC bind address               |
 | `JWT_EXPIRY_SECS`| `3600`                                     | JWT lifetime in seconds         |
+| `ADMIN_SECRET`   | *(optional)*                               | Seeds admin password on first boot |
+| `ADMIN_ENTITY_ID`| `00000000-0000-0000-0000-000000000001`     | Override seeded admin UUID      |
 | `RUST_LOG`       | `info`                                     | Log level filter                |
 
 ---
@@ -340,7 +342,7 @@ Role ─── has many ─── Capabilities
 # Check
 cargo check
 
-# Build
+# Build (also re-generates gRPC stubs from proto/atom/v1/atom.proto via build.rs)
 cargo build
 
 # Run with live reload
@@ -348,9 +350,86 @@ cargo watch -x run
 
 # Run Postgres only
 docker-compose up postgres -d
+
+# Lint
+cargo clippy -- -D warnings
+cargo fmt --check
 ```
 
-Migrations run automatically on startup via `sqlx::migrate!`. To add a migration, create `migrations/002_<name>.sql`.
+Migrations run automatically on startup via `sqlx::migrate!`. To add a migration, create `migrations/NNN_<name>.sql`.
+
+---
+
+## Generating proto stubs and docs
+
+### Prerequisites
+
+```bash
+# protoc (Protocol Buffer compiler)
+# macOS: brew install protobuf
+# Linux: apt install -y protobuf-compiler
+
+# buf (proto toolchain)
+# https://buf.build/docs/installation
+# macOS: brew install bufbuild/buf/buf
+
+# protoc-gen-doc (proto → Markdown)
+go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@latest
+```
+
+### Rust gRPC stubs
+
+Stubs are generated automatically by `cargo build` via `build.rs`. The source proto is at `proto/atom/v1/atom.proto`. No manual step is needed.
+
+```bash
+# Force regeneration
+touch proto/atom/v1/atom.proto && cargo build
+```
+
+### Proto documentation (`apidocs/grpc-reference.md`)
+
+`apidocs/grpc-reference.md` is auto-generated from the proto and **must be committed** after any proto change. CI fails if the committed file is out of date.
+
+```bash
+buf generate          # regenerates apidocs/grpc-reference.md
+git add apidocs/grpc-reference.md
+```
+
+### Lint and breaking-change check
+
+```bash
+buf lint              # validate proto style
+buf breaking --against '.git#branch=main'   # detect breaking changes vs main
+```
+
+### OpenAPI spec (`apidocs/openapi.yaml`)
+
+The OpenAPI spec is hand-maintained. Validate it locally before pushing:
+
+```bash
+npx @redocly/cli lint apidocs/openapi.yaml
+```
+
+To render it as interactive docs:
+
+```bash
+# Redoc preview
+npx @redocly/cli preview-docs apidocs/openapi.yaml
+
+# Swagger UI (Docker)
+docker run -p 8090:8080 \
+  -e SWAGGER_JSON=/spec/openapi.yaml \
+  -v $(pwd)/apidocs:/spec \
+  swaggerapi/swagger-ui
+```
+
+### Docs website
+
+```bash
+cd docs
+pnpm install
+pnpm dev     # http://localhost:3000
+```
 
 ---
 
