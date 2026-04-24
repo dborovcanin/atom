@@ -1,0 +1,77 @@
+---
+title: Audit Log
+description: Query the audit log for authorization decisions and identity events.
+---
+
+## GET /audit
+
+Reads audit log entries that Atom already writes for authorization checks, logins, logouts, and credential operations. Also available as `GET /entities/:id/audit` (alias for `GET /audit?entity_id=:id`).
+
+## Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `entity_id` | UUID | — | Filter by entity |
+| `event` | string | — | Filter by event type |
+| `outcome` | `allow` \| `deny` \| `error` | — | Filter by outcome |
+| `from` | datetime (ISO 8601) | — | Start of time range (inclusive) |
+| `to` | datetime (ISO 8601) | — | End of time range (exclusive) |
+| `limit` | int | 50 | Results per page (1-200) |
+| `offset` | int | 0 | Pagination offset |
+
+## Response
+
+```json
+{
+  "items": [
+    {
+      "id": "log1-...",
+      "entity_id": "aaa-...",
+      "event": "authz.check",
+      "outcome": "deny",
+      "details": {
+        "action": "write",
+        "resource_id": "r1-...",
+        "reason": "no matching allow policy"
+      },
+      "created_at": "2026-04-24T10:30:00Z"
+    },
+    {
+      "id": "log2-...",
+      "entity_id": "aaa-...",
+      "event": "auth.login",
+      "outcome": "allow",
+      "details": {
+        "credential_kind": "password",
+        "session_id": "s1-..."
+      },
+      "created_at": "2026-04-24T10:25:00Z"
+    }
+  ],
+  "total": 142
+}
+```
+
+## Event types
+
+| Event | When it's written | Details contain |
+|---|---|---|
+| `authz.check` | Every `POST /authz/check` call | `action`, `resource_id`, `reason` |
+| `authz.explain` | Every `POST /authz/explain` call | `action`, `resource_id`, `reason` |
+| `auth.login` | Successful or failed login | `credential_kind`, `session_id` |
+| `auth.logout` | Session revocation | `session_id` |
+| `credential.create` | Password or API key created | `credential_id`, `credential_kind` |
+| `credential.revoke` | Credential revoked | `credential_id`, `credential_kind` |
+
+## Use cases
+
+| Query | Endpoint |
+|---|---|
+| Why was sensor-01 denied in the last hour? | `GET /audit?entity_id=bbb&event=authz.check&outcome=deny&from=2026-04-24T09:30:00Z` |
+| All login activity today | `GET /audit?event=auth.login&from=2026-04-24T00:00:00Z` |
+| All audit events for Alice | `GET /entities/aaa/audit` |
+| All failed authorization checks | `GET /audit?event=authz.check&outcome=deny&limit=100` |
+
+<Callout type="info">
+Audit logs are immutable — there are no write or delete operations on this endpoint.
+</Callout>

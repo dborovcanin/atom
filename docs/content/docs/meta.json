@@ -5,6 +5,7 @@
     "quickstart",
     "architecture",
     "access-control",
-    "authentication"
+    "authentication",
+    "queries"
   ]
 }

@@ -1,0 +1,54 @@
+---
+title: Bulk Authorization Check
+description: Check multiple actions on a single resource in one call.
+---
+
+## POST /authz/check/bulk
+
+Check whether an entity can perform **multiple actions** on a resource in a single request. Avoids N round-trips when a UI needs to render permission-dependent buttons (edit, delete, share, etc.).
+
+## Request
+
+```json
+{
+  "subject_id":  "uuid",
+  "resource_id": "uuid",
+  "actions":     ["read", "write", "delete", "publish", "manage"],
+  "context":     {}
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `subject_id` | UUID | Yes | The entity attempting the actions |
+| `resource_id` | UUID | Yes | The target resource |
+| `actions` | string[] | Yes | Action names to check (max 20) |
+| `context` | object | No | Additional ABAC context (default `{}`) |
+
+## Response
+
+```json
+{
+  "subject_id": "aaa-...",
+  "resource_id": "r1-...",
+  "results": {
+    "read":    { "allowed": true,  "reason": "allowed" },
+    "write":   { "allowed": true,  "reason": "allowed" },
+    "delete":  { "allowed": false, "reason": "no matching allow policy" },
+    "publish": { "allowed": false, "reason": "explicitly denied by policy p1-..." },
+    "manage":  { "allowed": false, "reason": "no matching allow policy" }
+  }
+}
+```
+
+Each key in `results` maps to the same `{allowed, reason}` shape as `POST /authz/check`.
+
+## Validation
+
+- `actions` must contain 1 to 20 entries.
+- Duplicates are deduplicated — each action appears once in the response.
+- Unknown actions return `{ "allowed": false, "reason": "unknown action '<name>'" }`.
+
+## Performance
+
+Entity, resource, and policy bindings are loaded **once**. Each action is evaluated against the same binding set. This turns N database round-trips into 1-2 queries total.

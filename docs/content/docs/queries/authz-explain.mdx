@@ -1,0 +1,158 @@
+---
+title: Authorization Explain
+description: Full decision trail for a single authorization check.
+---
+
+## POST /authz/explain
+
+Same request as `POST /authz/check`, but the response includes the **full evaluation trail** — which bindings were evaluated, which matched, which one determined the final decision, and why others were skipped.
+
+## Request
+
+```json
+POST /authz/explain
+{
+  "subject_id":  "uuid",
+  "action":      "read",
+  "resource_id": "uuid",
+  "context":     {}
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `subject_id` | UUID | Yes | The entity attempting the action |
+| `action` | string | Yes | The action name (e.g. `read`, `publish`, `manage`) |
+| `resource_id` | UUID | Yes | The target resource |
+| `context` | object | No | Additional ABAC context (default `{}`) |
+
+## Response
+
+```json
+{
+  "allowed": false,
+  "reason": "explicitly denied by policy 9f3a...",
+
+  "subject": {
+    "id": "aaa-...",
+    "name": "sensor-01",
+    "kind": "device",
+    "status": "active"
+  },
+
+  "resource": {
+    "id": "bbb-...",
+    "kind": "channel",
+    "name": "temperature-feed",
+    "tenant_id": "t1-..."
+  },
+
+  "capability": {
+    "id": "ccc-...",
+    "name": "read",
+    "resource_kind": null
+  },
+
+  "matched_binding": {
+    "id": "9f3a-...",
+    "effect": "deny",
+    "grant_kind": "role",
+    "grant_id": "fff-...",
+    "role_name": "restricted-viewer",
+    "scope_kind": "resource_kind",
+    "scope_ref": "channel",
+    "conditions": {},
+    "via": "group:ops-team"
+  },
+
+  "evaluated_bindings": [
+    {
+      "id": "aaa1-...",
+      "effect": "allow",
+      "grant_kind": "role",
+      "grant_id": "ggg-...",
+      "role_name": "viewer",
+      "scope_kind": "resource_kind",
+      "scope_ref": "channel",
+      "via": "direct",
+      "result": "matched",
+      "skip_reason": null
+    },
+    {
+      "id": "9f3a-...",
+      "effect": "deny",
+      "grant_kind": "role",
+      "grant_id": "fff-...",
+      "role_name": "restricted-viewer",
+      "scope_kind": "resource_kind",
+      "scope_ref": "channel",
+      "via": "group:ops-team",
+      "result": "matched",
+      "skip_reason": null
+    },
+    {
+      "id": "bbb2-...",
+      "effect": "allow",
+      "grant_kind": "capability",
+      "grant_id": "ddd-...",
+      "role_name": null,
+      "scope_kind": "resource",
+      "scope_ref": "eee-...",
+      "via": "direct",
+      "result": "skipped",
+      "skip_reason": "scope_mismatch"
+    }
+  ]
+}
+```
+
+## Response fields
+
+### Top level
+
+| Field | Type | Description |
+|---|---|---|
+| `allowed` | bool | Final decision |
+| `reason` | string | Human-readable reason |
+| `subject` | object \| null | Resolved subject entity |
+| `resource` | object \| null | Resolved resource |
+| `capability` | object \| null | Resolved capability for the action |
+| `matched_binding` | object \| null | The binding that determined the decision |
+| `evaluated_bindings` | array | All bindings evaluated, in order |
+
+### Each evaluated binding
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Policy binding ID |
+| `effect` | `allow` \| `deny` | The binding's effect |
+| `grant_kind` | `capability` \| `role` | What the binding grants |
+| `grant_id` | UUID | ID of the capability or role |
+| `role_name` | string \| null | Role name if `grant_kind = role` |
+| `scope_kind` | string | Scope type |
+| `scope_ref` | string \| null | Scope reference |
+| `via` | string | `"direct"` or `"group:<group-name>"` |
+| `result` | `matched` \| `skipped` | Whether this binding matched |
+| `skip_reason` | string \| null | `scope_mismatch`, `grant_mismatch`, `conditions_mismatch`, or null |
+
+## Early exits
+
+If the subject is not found, not active, or the action is unknown, the response returns immediately with `subject`, `resource`, or `capability` set to null as appropriate, and `evaluated_bindings: []`.
+
+## Example scenarios
+
+### Allowed via role through a group
+
+Entity is in group `engineers`. Group has a policy: role `editor` on channels, effect `allow`. Entity tries to `write` to a channel.
+
+Result: `allowed: true`, `matched_binding.via = "group:engineers"`, `matched_binding.role_name = "editor"`.
+
+### Denied — deny overrides allow
+
+Entity has a direct allow binding for `read` on channels. But its group `restricted-devices` has a deny binding for `read` on channels.
+
+Result: `allowed: false`, `matched_binding.effect = "deny"`, `matched_binding.via = "group:restricted-devices"`. The allow binding appears in `evaluated_bindings` with `result: "matched"` but was overridden.
+
+<Callout type="warn">
+This endpoint does more work than `/authz/check` (resolving names, collecting all evaluations). Use it for debugging, not in hot paths.
+</Callout>

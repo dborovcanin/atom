@@ -1,0 +1,1415 @@
+{
+  "info": {
+    "_postman_id": "8c08cf49-8fb4-43fd-a3f0-atom00000001",
+    "name": "Atom Identity & Authorization",
+    "description": "Human-oriented smoke and workflow tests for Atom.\n\nPrerequisites:\n1. Start Postgres and Atom.\n2. Boot Atom once with ADMIN_SECRET matching the collection variable `admin_secret`.\n3. Default URL is `http://localhost:8080`.\n\nRun folders in order. The collection stores tokens and IDs as collection variables.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.collectionVariables.get('run_id')) {",
+          "  pm.collectionVariables.set('run_id', Date.now().toString());",
+          "}",
+          "if (!pm.collectionVariables.get('base_url')) {",
+          "  pm.collectionVariables.set('base_url', 'http://localhost:8080');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "admin_identifier",
+      "value": "atom-admin"
+    },
+    {
+      "key": "admin_secret",
+      "value": "change-me"
+    },
+    {
+      "key": "run_id",
+      "value": ""
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "device_api_key",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "00 Public",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('healthy', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('ok');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWKS",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/.well-known/jwks.json",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                ".well-known",
+                "jwks.json"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('has public signing keys', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.keys).to.be.an('array').that.is.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 Admin Auth",
+      "item": [
+        {
+          "name": "Login Admin",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"identifier\": \"{{admin_identifier}}\",\n  \"secret\": \"{{admin_secret}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('admin login succeeds', function () { pm.response.to.have.status(200); });",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('token', json.token);",
+                  "pm.collectionVariables.set('admin_entity_id', json.entity_id);",
+                  "pm.collectionVariables.set('admin_session_id', json.session_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Admin Session",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/auth/sessions/{{admin_session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "sessions",
+                "{{admin_session_id}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('session is active', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().revoked_at).to.eql(null);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 Setup Fixtures",
+      "item": [
+        {
+          "name": "List Seeded Capabilities",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/capabilities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "capabilities"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('seeded capabilities exist', function () { pm.response.to.have.status(200); });",
+                  "const caps = pm.response.json().items || [];",
+                  "['read', 'write', 'delete', 'publish', 'subscribe', 'execute', 'manage'].forEach(function (name) {",
+                  "  const cap = caps.find(c => c.name === name && c.resource_kind === null);",
+                  "  if (cap) pm.collectionVariables.set(name + '_capability_id', cap.id);",
+                  "});",
+                  "pm.test('publish and read captured', function () {",
+                  "  pm.expect(pm.collectionVariables.get('publish_capability_id')).to.be.ok;",
+                  "  pm.expect(pm.collectionVariables.get('read_capability_id')).to.be.ok;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Human Entity",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"human\",\n  \"name\": \"alice-{{run_id}}\",\n  \"tenant_id\": null,\n  \"attributes\": {\n    \"department\": \"engineering\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('human created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('human_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Human Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"human-secret-{{run_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities/{{human_id}}/credentials/password",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{human_id}}",
+                "credentials",
+                "password"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('password credential created', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Device Entity",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"device\",\n  \"name\": \"device-{{run_id}}\",\n  \"tenant_id\": null,\n  \"attributes\": {\n    \"floor\": \"1\",\n    \"department\": \"engineering\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('device created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('device_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Service Entity",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"service\",\n  \"name\": \"service-{{run_id}}\",\n  \"tenant_id\": null,\n  \"attributes\": {\n    \"department\": \"engineering\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('service created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('service_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Channel Resource",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"channel\",\n  \"name\": \"telemetry-{{run_id}}\",\n  \"tenant_id\": null,\n  \"owner_id\": \"{{human_id}}\",\n  \"attributes\": {\n    \"env\": \"prod\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/resources",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "resources"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('channel resource created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('channel_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Secret Resource",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"secret\",\n  \"name\": \"prod-secret-{{run_id}}\",\n  \"tenant_id\": null,\n  \"owner_id\": \"{{service_id}}\",\n  \"attributes\": {\n    \"env\": \"prod\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/resources",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "resources"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('secret resource created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('secret_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 Identity Workflows",
+      "item": [
+        {
+          "name": "List Entities",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/entities?limit=10&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('entities listed', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Device Entity",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/entities/{{device_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{device_id}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('device fetched', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('device_id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Device Entity",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"attributes\": {\n    \"floor\": \"2\",\n    \"department\": \"engineering\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities/{{device_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{device_id}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('device updated', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().attributes.floor).to.eql('2');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Group",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"floor-sensors-{{run_id}}\",\n  \"tenant_id\": null,\n  \"description\": \"Smoke-test sensor group\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/groups",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "groups"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('group created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('group_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add Device To Group",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"entity_id\": \"{{device_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/groups/{{group_id}}/members",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "groups",
+                "{{group_id}}",
+                "members"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('device added to group', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Group Members",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/groups/{{group_id}}/members",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "groups",
+                "{{group_id}}",
+                "members"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('group contains device', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const ids = (pm.response.json().items || []).map(e => e.id);",
+                  "  pm.expect(ids).to.include(pm.collectionVariables.get('device_id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add Ownership Human Owns Device",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"owned_id\": \"{{device_id}}\",\n  \"relation\": \"owner\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities/{{human_id}}/owned",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{human_id}}",
+                "owned"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ownership added', function () { pm.response.to.have.status(201); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Human Owned Entities",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/entities/{{human_id}}/owned",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{human_id}}",
+                "owned"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('owned list contains device', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const ids = (pm.response.json().items || []).map(e => e.id);",
+                  "  pm.expect(ids).to.include(pm.collectionVariables.get('device_id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 Authorization Workflows",
+      "item": [
+        {
+          "name": "Create Publisher Role",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"channel-publisher-{{run_id}}\",\n  \"tenant_id\": null,\n  \"description\": \"Can publish telemetry to channels\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/roles",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "roles"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('role created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('publisher_role_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add Publish Capability To Role",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"capability_id\": \"{{publish_capability_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/roles/{{publisher_role_id}}/capabilities",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "roles",
+                "{{publisher_role_id}}",
+                "capabilities"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('capability added to role', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bind Publisher Role To Device For Channels",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_kind\": \"entity\",\n  \"subject_id\": \"{{device_id}}\",\n  \"grant_kind\": \"role\",\n  \"grant_id\": \"{{publisher_role_id}}\",\n  \"scope_kind\": \"resource_kind\",\n  \"scope_ref\": \"channel\",\n  \"effect\": \"allow\",\n  \"conditions\": {}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/policies",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "policies"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('allow policy created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('device_publish_policy_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authz Check Device Publish Channel Allowed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_id\": \"{{device_id}}\",\n  \"action\": \"publish\",\n  \"resource_id\": \"{{channel_id}}\",\n  \"context\": {}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/authz/check",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "authz",
+                "check"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('publish allowed by role policy', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().allowed).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authz Check Device Delete Channel Default Deny",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_id\": \"{{device_id}}\",\n  \"action\": \"delete\",\n  \"resource_id\": \"{{channel_id}}\",\n  \"context\": {}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/authz/check",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "authz",
+                "check"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('delete denied by default', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().allowed).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Deny Publish Policy For Device On Channel",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_kind\": \"entity\",\n  \"subject_id\": \"{{device_id}}\",\n  \"grant_kind\": \"capability\",\n  \"grant_id\": \"{{publish_capability_id}}\",\n  \"scope_kind\": \"resource\",\n  \"scope_ref\": \"{{channel_id}}\",\n  \"effect\": \"deny\",\n  \"conditions\": {}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/policies",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "policies"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('deny policy created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('device_publish_deny_policy_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authz Check Deny Overrides Allow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_id\": \"{{device_id}}\",\n  \"action\": \"publish\",\n  \"resource_id\": \"{{channel_id}}\",\n  \"context\": {}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/authz/check",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "authz",
+                "check"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('deny overrides allow', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().allowed).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create ABAC Read Policy For Service",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_kind\": \"entity\",\n  \"subject_id\": \"{{service_id}}\",\n  \"grant_kind\": \"capability\",\n  \"grant_id\": \"{{read_capability_id}}\",\n  \"scope_kind\": \"resource_kind\",\n  \"scope_ref\": \"secret\",\n  \"effect\": \"allow\",\n  \"conditions\": {\n    \"entity.attributes.department\": \"engineering\",\n    \"resource.attributes.env\": \"prod\",\n    \"context.ip_trusted\": \"true\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/policies",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "policies"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('abac policy created', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('service_abac_policy_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authz Check ABAC Allowed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_id\": \"{{service_id}}\",\n  \"action\": \"read\",\n  \"resource_id\": \"{{secret_id}}\",\n  \"context\": {\n    \"ip_trusted\": \"true\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/authz/check",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "authz",
+                "check"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('abac conditions satisfied', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().allowed).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authz Check ABAC Denied When Context Missing",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject_id\": \"{{service_id}}\",\n  \"action\": \"read\",\n  \"resource_id\": \"{{secret_id}}\",\n  \"context\": {\n    \"ip_trusted\": \"false\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/authz/check",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "authz",
+                "check"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('abac condition mismatch denies', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().allowed).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 API Keys",
+      "item": [
+        {
+          "name": "Create Device API Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"expires_at\": null,\n  \"description\": \"Postman smoke-test key {{run_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/entities/{{device_id}}/credentials/api-keys",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{device_id}}",
+                "credentials",
+                "api-keys"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('api key created', function () { pm.response.to.have.status(201); });",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('device_api_key', json.key);",
+                  "pm.collectionVariables.set('device_api_key_credential_id', json.credential_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Use Device API Key To Get Device",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{device_api_key}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/entities/{{device_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{device_id}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('api key authenticates', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('device_id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Device Credentials",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/entities/{{device_id}}/credentials",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{device_id}}",
+                "credentials"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('credential list includes api key summary only', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const items = pm.response.json().items || [];",
+                  "  pm.expect(items.map(c => c.id)).to.include(pm.collectionVariables.get('device_api_key_credential_id'));",
+                  "  pm.expect(JSON.stringify(items)).to.not.include(pm.collectionVariables.get('device_api_key'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Revoke Device API Key",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/entities/{{device_id}}/credentials/{{device_api_key_credential_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "entities",
+                "{{device_id}}",
+                "credentials",
+                "{{device_api_key_credential_id}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('api key revoked', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 Admin Hygiene",
+      "item": [
+        {
+          "name": "List Policies For Device",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/policies?subject_kind=entity&subject_id={{device_id}}&limit=20&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "policies"
+              ],
+              "query": [
+                {
+                  "key": "subject_kind",
+                  "value": "entity"
+                },
+                {
+                  "key": "subject_id",
+                  "value": "{{device_id}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('device policies listed', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rotate Signing Keys",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/auth/keys/rotate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "keys",
+                "rotate"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('keys rotated by admin manage permission', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout Admin",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/auth/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('admin logged out', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

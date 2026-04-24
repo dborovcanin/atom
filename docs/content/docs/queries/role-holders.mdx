@@ -1,0 +1,89 @@
+---
+title: Role Holders
+description: Who holds this role? Impact analysis before modifying or deleting a role.
+---
+
+## GET /roles/:id/holders
+
+Returns all entities and groups that hold a specific role, along with the policy binding details. Essential for impact analysis before modifying or deleting a role.
+
+## Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `tenant_id` | UUID | — | Filter subjects by tenant |
+| `subject_kind` | `entity` \| `group` | — | Filter by subject kind |
+| `limit` | int | 20 | Results per page (1-100) |
+| `offset` | int | 0 | Pagination offset |
+
+## Response
+
+```json
+{
+  "role": {
+    "id": "v1-...",
+    "name": "viewer",
+    "tenant_id": "t1-...",
+    "description": "Read-only access",
+    "capabilities": [
+      { "id": "c1-...", "name": "read" },
+      { "id": "c2-...", "name": "subscribe" }
+    ]
+  },
+  "items": [
+    {
+      "subject_kind": "entity",
+      "entity": {
+        "id": "aaa-...",
+        "name": "alice",
+        "kind": "human",
+        "tenant_id": "t1-..."
+      },
+      "group": null,
+      "policy_id": "p1-...",
+      "effect": "allow",
+      "scope_kind": "resource_kind",
+      "scope_ref": "channel",
+      "conditions": {}
+    },
+    {
+      "subject_kind": "group",
+      "entity": null,
+      "group": {
+        "id": "g1-...",
+        "name": "ops-team",
+        "tenant_id": "t1-...",
+        "member_count": 12
+      },
+      "policy_id": "p3-...",
+      "effect": "allow",
+      "scope_kind": "resource_kind",
+      "scope_ref": "device",
+      "conditions": { "resource.attributes.env": "prod" }
+    }
+  ],
+  "total": 2
+}
+```
+
+## Response fields
+
+| Field | Type | Description |
+|---|---|---|
+| `role` | object | Role details including its capabilities |
+| `subject_kind` | `entity` \| `group` | Who holds the role |
+| `entity` | object \| null | Entity details (if subject is an entity) |
+| `group` | object \| null | Group details with `member_count` (if subject is a group) |
+| `policy_id` | UUID | The policy binding that assigns this role |
+| `effect` | `allow` \| `deny` | Binding effect |
+| `scope_kind` | string | How broad the scope is |
+| `scope_ref` | string \| null | Scope reference |
+| `conditions` | object | ABAC conditions |
+
+## Use cases
+
+| Query | Endpoint |
+|---|---|
+| Who holds the editor role? | `GET /roles/v2/holders` |
+| Before deleting this role, who will lose access? | `GET /roles/v1/holders` |
+| Which groups hold this role? | `GET /roles/v1/holders?subject_kind=group` |

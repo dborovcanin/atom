@@ -11,6 +11,7 @@
 
 # IDE
 .idea/
+
 .vscode/
 *.iml
 
@@ -20,3 +21,5 @@ Thumbs.db
 
 # Logs
 *.log
+
+.codex

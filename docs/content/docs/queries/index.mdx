@@ -1,0 +1,73 @@
+---
+title: Queries & Search
+description: Endpoints for querying access relationships, auditing decisions, and managing authorization hygiene.
+---
+
+Atom's CRUD endpoints let you create and manage entities, resources, roles, and policies. But operating an authorization system requires answering questions that span multiple tables — **who can access what, why was access denied, and what would change if I modify a role?**
+
+This section documents the query and search endpoints that answer these questions.
+
+## Why these endpoints exist
+
+Atom's existing list endpoints return raw rows from individual tables:
+
+| Existing endpoint | Returns |
+|---|---|
+| `GET /policies?subject_id=...` | Policy bindings for a subject — just IDs, no resource or role details |
+| `GET /resources?tenant_id=...` | Resources in a tenant — no link to who can access them |
+| `GET /roles/:id/capabilities` | Capabilities in a role — no link to who holds the role |
+| `POST /authz/check` | Yes/no for a single resource — no explanation |
+
+These are useful for CRUD, but they don't answer operational questions like:
+- "What resources can this device access?" (requires joining policies, roles, capabilities, and resources)
+- "Why was this entity denied?" (requires showing the full evaluation trail)
+- "Who will be affected if I change this role?" (requires reverse-looking up role holders)
+
+## Endpoint categories
+
+### Authorization queries (runtime)
+
+| Endpoint | Question it answers |
+|---|---|
+| [`POST /authz/explain`](/docs/queries/authz-explain) | **Why** can/can't this entity perform this action? Full decision trail. |
+| [`POST /authz/check/bulk`](/docs/queries/bulk-check) | Can this entity perform **multiple actions** on a resource? Single call. |
+
+### Access queries (who can do what)
+
+| Endpoint | Question it answers |
+|---|---|
+| [`GET /entities/:id/access`](/docs/queries/entity-access) | What resources can this entity access, with which roles and capabilities? |
+| [`GET /resources/:id/access`](/docs/queries/resource-access) | Who can access this resource, with which roles and capabilities? |
+| [`GET /entities/:id/effective-capabilities`](/docs/queries/effective-capabilities) | Flat, deduplicated list of what this entity can actually do. |
+
+### Relationship queries (impact analysis)
+
+| Endpoint | Question it answers |
+|---|---|
+| [`GET /roles/:id/holders`](/docs/queries/role-holders) | Who holds this role? Needed before modifying or deleting a role. |
+| [`GET /groups/:id/access`](/docs/queries/group-access) | What access does membership in this group grant? |
+
+### Audit
+
+| Endpoint | Question it answers |
+|---|---|
+| [`GET /audit`](/docs/queries/audit) | Query the audit log. Filter by entity, event type, outcome, and time range. |
+
+### Admin hygiene
+
+| Endpoint | Question it answers |
+|---|---|
+| [`GET /admin/orphan-policies`](/docs/queries/admin-hygiene#orphan-policies) | Policies referencing deleted entities, groups, or roles. |
+| [`GET /admin/unprotected-resources`](/docs/queries/admin-hygiene#unprotected-resources) | Resources with no policies covering them. |
+| [`GET /admin/expiring-credentials`](/docs/queries/admin-hygiene#expiring-credentials) | Credentials expiring within N days. |
+
+## Design principles
+
+All query endpoints follow these rules:
+
+1. **Read-only** — queries never modify state.
+2. **No schema changes** — all queries work against the existing tables and indexes.
+3. **Paginated** — list endpoints accept `limit` and `offset` parameters.
+4. **Filtered** — each endpoint exposes filters relevant to its use case (tenant, resource kind, action, etc.).
+5. **Resolved** — responses include resolved names and details, not just UUIDs. An admin should be able to read a response without cross-referencing other endpoints.
+6. **Source tracking** — where access comes from multiple paths (direct grant vs. group membership, capability vs. role), the response shows the source.

@@ -1,0 +1,134 @@
+---
+title: Admin Hygiene
+description: Detect orphaned policies, unprotected resources, and expiring credentials.
+---
+
+Administrative endpoints for surfacing system health issues. All three require `RequireManage` — the caller must hold the `manage` capability with `scope_kind = all`.
+
+## GET /admin/orphan-policies {#orphan-policies}
+
+Returns policy bindings where the referenced subject (entity or group) or grant (capability or role) no longer exists.
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 50 | Results per page (1-200) |
+| `offset` | int | 0 | Pagination offset |
+
+### Response
+
+```json
+{
+  "items": [
+    {
+      "id": "p1-...",
+      "subject_kind": "entity",
+      "subject_id": "aaa-...",
+      "grant_kind": "role",
+      "grant_id": "v1-...",
+      "scope_kind": "resource_kind",
+      "scope_ref": "channel",
+      "effect": "allow",
+      "conditions": {},
+      "created_at": "2026-03-15T12:00:00Z",
+      "orphan_reason": "subject_not_found"
+    }
+  ],
+  "total": 1
+}
+```
+
+### `orphan_reason` values
+
+| Value | Meaning |
+|---|---|
+| `subject_not_found` | The referenced entity or group has been deleted |
+| `grant_not_found` | The referenced capability or role has been deleted |
+
+---
+
+## GET /admin/unprotected-resources {#unprotected-resources}
+
+Returns resources that have **no policy bindings** covering them — not directly, not by kind, and not by a global `scope_kind = all` binding.
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `tenant_id` | UUID | — | Filter by tenant |
+| `kind` | string | — | Filter by resource kind |
+| `limit` | int | 50 | Results per page (1-200) |
+| `offset` | int | 0 | Pagination offset |
+
+### Response
+
+```json
+{
+  "items": [
+    {
+      "id": "r5-...",
+      "kind": "secret",
+      "name": "db-password",
+      "tenant_id": "t1-...",
+      "owner_id": null,
+      "created_at": "2026-04-20T14:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+<Callout type="info">
+If any `scope_kind = all` policy binding exists in the system, every resource is covered and this endpoint returns an empty list.
+</Callout>
+
+---
+
+## GET /admin/expiring-credentials {#expiring-credentials}
+
+Returns active credentials expiring within a specified number of days. Useful for proactive rotation before integrations break.
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `days` | int | 30 | Show credentials expiring within this many days |
+| `entity_id` | UUID | — | Filter by entity |
+| `kind` | `password` \| `api_key` \| `certificate` | — | Filter by credential kind |
+| `limit` | int | 50 | Results per page (1-200) |
+| `offset` | int | 0 | Pagination offset |
+
+### Response
+
+```json
+{
+  "items": [
+    {
+      "id": "cr1-...",
+      "entity_id": "bbb-...",
+      "entity_name": "sensor-01",
+      "entity_kind": "device",
+      "kind": "api_key",
+      "status": "active",
+      "expires_at": "2026-05-10T00:00:00Z",
+      "days_remaining": 16,
+      "created_at": "2026-01-10T00:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+Sorted by `expires_at ASC` (soonest expiration first). The `secret_hash` and `identifier` fields are **never** included.
+
+---
+
+## Use cases
+
+| Task | Endpoint |
+|---|---|
+| Weekly cleanup of stale policies | `GET /admin/orphan-policies` |
+| Security audit: verify all resources have coverage | `GET /admin/unprotected-resources` |
+| Daily alert: credentials expiring this week | `GET /admin/expiring-credentials?days=7` |
+| Check a specific tenant's unprotected resources | `GET /admin/unprotected-resources?tenant_id=t1` |

@@ -1,0 +1,12 @@
+.git
+.codex
+target
+docs/node_modules
+docs/.next
+docs/out
+docs/dist
+*.log
+.env
+.env.*
+postman
+product-docs

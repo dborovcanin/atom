@@ -1,0 +1,107 @@
+---
+title: Entity Access
+description: What resources can this entity access, with which roles and capabilities?
+---
+
+## GET /entities/:id/access
+
+Returns all resources an entity can access, showing which roles, capabilities, and policy bindings grant the access — including access inherited through group memberships.
+
+## Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `tenant_id` | UUID | — | Filter resources by tenant |
+| `resource_kind` | string | — | Filter resources by kind (e.g. `channel`, `device`) |
+| `action` | string | — | Filter by specific action/capability name |
+| `effect` | `allow` \| `deny` | — | Filter by effect |
+| `limit` | int | 20 | Results per page (1-100) |
+| `offset` | int | 0 | Pagination offset |
+
+## Response
+
+```json
+{
+  "entity_id": "aaa-...",
+  "entity_name": "alice",
+  "entity_kind": "human",
+  "items": [
+    {
+      "resource": {
+        "id": "r1-...",
+        "kind": "channel",
+        "name": "temperature-feed",
+        "tenant_id": "t1-..."
+      },
+      "effect": "allow",
+      "scope_kind": "resource_kind",
+      "scope_ref": "channel",
+      "policy_id": "p1-...",
+      "grant": {
+        "kind": "role",
+        "role": { "id": "v1-...", "name": "viewer" },
+        "capabilities": [
+          { "id": "c1-...", "name": "read" },
+          { "id": "c2-...", "name": "subscribe" }
+        ]
+      },
+      "conditions": {},
+      "via": "direct"
+    },
+    {
+      "resource": {
+        "id": "r2-...",
+        "kind": "device",
+        "name": "pump-1",
+        "tenant_id": "t1-..."
+      },
+      "effect": "allow",
+      "scope_kind": "resource",
+      "scope_ref": "r2-...",
+      "policy_id": "p2-...",
+      "grant": {
+        "kind": "capability",
+        "role": null,
+        "capabilities": [
+          { "id": "c3-...", "name": "execute" }
+        ]
+      },
+      "conditions": { "context.ip_trusted": "true" },
+      "via": "group:field-engineers"
+    }
+  ],
+  "total": 2
+}
+```
+
+## Response fields
+
+| Field | Type | Description |
+|---|---|---|
+| `resource` | object | Resource details (id, kind, name, tenant_id) |
+| `effect` | `allow` \| `deny` | Whether this is an allow or deny |
+| `scope_kind` | string | How broad the scope is |
+| `policy_id` | UUID | The policy binding that creates this access |
+| `grant.kind` | `capability` \| `role` | Grant type |
+| `grant.role` | object \| null | Role info if applicable |
+| `grant.capabilities` | array | Capabilities granted (expanded from role if applicable) |
+| `conditions` | object | ABAC conditions on the binding |
+| `via` | string | `"direct"` or `"group:<group-name>"` |
+
+## Scope expansion
+
+- **`scope_kind = resource`** — one item per directly referenced resource.
+- **`scope_kind = resource_kind`** — one item per resource matching that kind.
+- **`scope_kind = all`** — one item per resource (within tenant filter if provided).
+
+Pagination applies to the expanded resource list.
+
+## Use cases
+
+| Query | Endpoint |
+|---|---|
+| What can Alice access in tenant 1? | `GET /entities/aaa/access?tenant_id=t1` |
+| What can Alice access across all tenants? | `GET /entities/aaa/access` |
+| What channels can Alice access in tenant 1? | `GET /entities/aaa/access?tenant_id=t1&resource_kind=channel` |
+| What can Alice read? | `GET /entities/aaa/access?action=read` |
+| What is Alice denied? | `GET /entities/aaa/access?effect=deny` |

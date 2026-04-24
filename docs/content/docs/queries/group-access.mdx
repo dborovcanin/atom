@@ -1,0 +1,86 @@
+---
+title: Group Access
+description: What access does membership in this group grant?
+---
+
+## GET /groups/:id/access
+
+Returns what resources and capabilities are accessible through membership in this group. Use this to preview what an entity will gain before adding it to a group.
+
+## Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `resource_kind` | string | — | Filter by resource kind |
+| `action` | string | — | Filter by action/capability name |
+| `effect` | `allow` \| `deny` | — | Filter by effect |
+| `limit` | int | 20 | Results per page (1-100) |
+| `offset` | int | 0 | Pagination offset |
+
+## Response
+
+```json
+{
+  "group_id": "g1-...",
+  "group": {
+    "name": "field-engineers",
+    "tenant_id": "t1-...",
+    "member_count": 8
+  },
+  "items": [
+    {
+      "resource": {
+        "id": "r1-...",
+        "kind": "device",
+        "name": "pump-1",
+        "tenant_id": "t1-..."
+      },
+      "effect": "allow",
+      "scope_kind": "resource_kind",
+      "scope_ref": "device",
+      "policy_id": "p1-...",
+      "grant": {
+        "kind": "role",
+        "role": { "id": "v1-...", "name": "operator" },
+        "capabilities": [
+          { "id": "c1-...", "name": "read" },
+          { "id": "c2-...", "name": "write" },
+          { "id": "c3-...", "name": "execute" }
+        ]
+      },
+      "conditions": {}
+    },
+    {
+      "resource": {
+        "id": "r2-...",
+        "kind": "channel",
+        "name": "telemetry",
+        "tenant_id": "t1-..."
+      },
+      "effect": "allow",
+      "scope_kind": "resource_kind",
+      "scope_ref": "channel",
+      "policy_id": "p2-...",
+      "grant": {
+        "kind": "capability",
+        "role": null,
+        "capabilities": [
+          { "id": "c4-...", "name": "subscribe" }
+        ]
+      },
+      "conditions": {}
+    }
+  ],
+  "total": 2
+}
+```
+
+Same item shape as [entity access](/docs/queries/entity-access), but without the `via` field (access is always from this group).
+
+## Use cases
+
+| Query | Endpoint |
+|---|---|
+| What does joining this group grant? | `GET /groups/g1/access` |
+| What device access does this group have? | `GET /groups/g1/access?resource_kind=device` |
+| Does this group have any deny policies? | `GET /groups/g1/access?effect=deny` |

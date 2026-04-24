@@ -1,0 +1,130 @@
+---
+title: Effective Capabilities
+description: Flat, deduplicated list of what an entity can actually do.
+---
+
+## GET /entities/:id/effective-capabilities
+
+Returns the flattened, deduplicated list of capabilities an entity holds — after expanding all roles and group memberships. Each capability includes its `sources` showing every path through which the entity received it.
+
+This is different from [entity access](/docs/queries/entity-access) which is resource-centric. This endpoint is **action-centric** — "what actions can this entity perform?"
+
+## Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `tenant_id` | UUID | — | Only consider policies whose roles belong to this tenant |
+| `resource_kind` | string | — | Only include capabilities for this resource kind (or `NULL` = all kinds) |
+
+## Response
+
+```json
+{
+  "entity_id": "aaa-...",
+  "entity_name": "alice",
+  "entity_kind": "human",
+  "capabilities": [
+    {
+      "id": "c1-...",
+      "name": "read",
+      "resource_kind": null,
+      "sources": [
+        {
+          "kind": "role",
+          "role_id": "v1-...",
+          "role_name": "viewer",
+          "policy_id": "p1-...",
+          "scope_kind": "resource_kind",
+          "scope_ref": "channel",
+          "effect": "allow",
+          "via": "direct"
+        },
+        {
+          "kind": "role",
+          "role_id": "v2-...",
+          "role_name": "editor",
+          "policy_id": "p2-...",
+          "scope_kind": "all",
+          "scope_ref": null,
+          "effect": "allow",
+          "via": "group:ops-team"
+        }
+      ]
+    },
+    {
+      "id": "c2-...",
+      "name": "write",
+      "resource_kind": null,
+      "sources": [
+        {
+          "kind": "role",
+          "role_id": "v2-...",
+          "role_name": "editor",
+          "policy_id": "p2-...",
+          "scope_kind": "all",
+          "scope_ref": null,
+          "effect": "allow",
+          "via": "group:ops-team"
+        }
+      ]
+    },
+    {
+      "id": "c3-...",
+      "name": "publish",
+      "resource_kind": null,
+      "sources": [
+        {
+          "kind": "role",
+          "role_id": "v3-...",
+          "role_name": "restricted",
+          "policy_id": "p4-...",
+          "scope_kind": "resource_kind",
+          "scope_ref": "channel",
+          "effect": "deny",
+          "via": "direct"
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Why sources matter
+
+The same capability can arrive through multiple paths:
+
+```
+read ← viewer role ← direct binding (scope: channels)
+read ← editor role ← group:ops-team binding (scope: all)
+```
+
+Knowing the sources lets an administrator:
+
+1. **Revoke precisely** — remove one source without affecting others.
+2. **Understand deny** — a capability with both `allow` and `deny` sources means the deny wins. The response shows both.
+3. **Audit group inheritance** — see which capabilities come from groups vs. direct grants.
+
+## Source fields
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `capability` \| `role` | Whether granted directly or via a role |
+| `role_id` | UUID \| null | Role ID if kind = role |
+| `role_name` | string \| null | Role name if kind = role |
+| `policy_id` | UUID | The policy binding |
+| `scope_kind` | string | Scope of the binding |
+| `scope_ref` | string \| null | Scope reference |
+| `effect` | `allow` \| `deny` | Effect |
+| `via` | string | `"direct"` or `"group:<group-name>"` |
+
+## Use cases
+
+| Query | Endpoint |
+|---|---|
+| What can Alice do? | `GET /entities/aaa/effective-capabilities` |
+| What can this device do with channels? | `GET /entities/bbb/effective-capabilities?resource_kind=channel` |
+| What capabilities does this service have in tenant 1? | `GET /entities/ccc/effective-capabilities?tenant_id=t1` |
+
+<Callout type="info">
+This endpoint is not paginated — it returns all distinct capabilities, which is typically small (fewer than 50 even in complex setups).
+</Callout>

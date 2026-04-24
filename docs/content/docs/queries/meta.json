@@ -1,0 +1,15 @@
+{
+  "title": "Queries & Search",
+  "pages": [
+    "index",
+    "authz-explain",
+    "entity-access",
+    "resource-access",
+    "audit",
+    "bulk-check",
+    "role-holders",
+    "group-access",
+    "effective-capabilities",
+    "admin-hygiene"
+  ]
+}
