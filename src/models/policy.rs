@@ -300,6 +300,8 @@ pub struct PolicyList {
 /// - `object_kind` + `object_id`: explicit form. Currently supports
 ///   `object_kind = "resource"` (same as `resource_id`) and
 ///   `object_kind = "tenant"` (resolves from `tenants`, kind = `"tenant"`).
+/// - `object_kind = "platform"`: global platform object. Does not use
+///   `object_id`.
 ///
 /// At least one form must be supplied. If both are supplied, the explicit
 /// `object_kind`/`object_id` pair takes precedence.

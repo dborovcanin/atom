@@ -1264,7 +1264,7 @@ Atom is successful when:
 
 3. **Session validation on the authz path (AUTH-6).** Validating session liveness in the database on every `/authz/check` is expensive at high QPS. Options: (a) DB lookup per check, (b) short-lived JWT plus refresh token with no per-check DB hit, (c) in-process revocation set refreshed by polling or Postgres `LISTEN/NOTIFY` for bounded-staleness revocation. Recommendation: (c) with a documented staleness bound (e.g., 1–5 s).
 
-4. **Migrations on startup with multiple replicas.** When N replicas start concurrently, how are migrations serialized? Options: Postgres advisory lock around the migration step, leader-only migration via deployment ordering, or first-replica-wins with retries on the others. Decide.
+4. **Migrations on startup with multiple replicas.** When N replicas start concurrently, how are migrations serialized? Options: Postgres advisory lock around the migration step, leader-only migration via deployment ordering, or first-replica-wins with retries on the others. This is not a current priority because Postgres replicas are out of scope for now, but keep the question open for future multi-replica deployments. Decide.
 
 ---
 

@@ -53,12 +53,29 @@ pub(crate) struct ProtectedObject {
 /// Resolve the protected object identified by an authz request.
 /// Returns `Ok(None)` if the object does not exist; returns
 /// `BadRequest` if the request supplies neither `resource_id` nor
-/// `(object_kind, object_id)`, or supplies an unsupported `object_kind`.
+/// `(object_kind, object_id)`, supplies `object_kind = "platform"`, or supplies
+/// an unsupported `object_kind`.
 pub(crate) async fn resolve_object(
     pool: &PgPool,
     req: &AuthzRequest,
 ) -> Result<Option<ProtectedObject>, AppError> {
     use sqlx::Row;
+
+    if req.object_kind.as_deref() == Some("platform") {
+        if req.object_id.is_some() {
+            return Err(AppError::bad_request(
+                "object_id is not supported when object_kind is platform",
+            ));
+        }
+        return Ok(Some(ProtectedObject {
+            id: Uuid::nil(),
+            coarse_kind: "platform".to_string(),
+            kind: "platform".to_string(),
+            name: Some("platform".to_string()),
+            tenant_id: None,
+            attributes: Value::Object(Default::default()),
+        }));
+    }
 
     // Explicit (object_kind, object_id) wins when present.
     if req.object_kind.is_some() || req.object_id.is_some() {
@@ -92,7 +109,7 @@ pub(crate) async fn resolve_object(
             }
             "entity" => load_entity_as_object(pool, id).await,
             other => Err(AppError::bad_request(format!(
-                "unsupported object_kind '{other}' (supported: resource, tenant, entity)"
+                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity)"
             ))),
         };
     }

@@ -23,3 +23,6 @@ Thumbs.db
 *.log
 
 .codex
+
+# Local demo tooling downloaded by Codex/VHS runs
+.local-tools/
