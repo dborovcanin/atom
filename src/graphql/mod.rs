@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod authz;
+pub mod console;
 pub mod credentials;
 pub mod entities;
 pub mod groups;

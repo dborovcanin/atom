@@ -180,8 +180,101 @@ pub fn create_router(state: AppState) -> Router {
     #[cfg(debug_assertions)]
     let app = app.route("/graphql/playground", get(graphql::graphql_playground));
 
+    let app = if state.config.graphql_console_enabled {
+        app.route("/graphql/console", get(graphql::console::graphql_console))
+    } else {
+        app
+    };
+
     app.with_state(state)
         .layer(Extension(graphql_schema))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    use crate::{
+        config::{Config, ADMIN_ENTITY_ID},
+        keys::{ActiveKeys, LoadedKey},
+        state::AppState,
+    };
+
+    use super::create_router;
+
+    #[tokio::test]
+    async fn graphql_console_route_is_not_registered_when_disabled() {
+        let app = create_router(test_state(false));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/graphql/console")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn graphql_console_route_is_registered_when_enabled() {
+        let app = create_router(test_state(true));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/graphql/console")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let html = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(html.contains("Atom GraphQL Console"));
+    }
+
+    fn test_state(graphql_console_enabled: bool) -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://atom:atom@localhost/atom_test")
+            .expect("create lazy test pool");
+        let config = Config {
+            database_url: "postgres://atom:atom@localhost/atom_test".into(),
+            listen_addr: "127.0.0.1:0".into(),
+            grpc_addr: "127.0.0.1:0".into(),
+            jwt_expiry_secs: 3600,
+            admin_entity_id: ADMIN_ENTITY_ID,
+            admin_secret: None,
+            graphql_console_enabled,
+        };
+        let primary = LoadedKey {
+            kid: "test".into(),
+            public_key_pem: String::new(),
+            private_key_pem: String::new(),
+            x_b64: String::new(),
+            y_b64: String::new(),
+        };
+        AppState::new(
+            pool,
+            config,
+            ActiveKeys {
+                primary,
+                standby: None,
+            },
+        )
+    }
 }

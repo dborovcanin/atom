@@ -26,6 +26,7 @@ fn state(pool: PgPool) -> AppState {
         jwt_expiry_secs: 3600,
         admin_entity_id: ADMIN_ENTITY_ID,
         admin_secret: None,
+        graphql_console_enabled: false,
     };
     let primary = LoadedKey {
         kid: "test".into(),

@@ -15,6 +15,8 @@ pub struct Config {
     pub admin_entity_id: Uuid,
     /// If set, the admin entity's password credential is created on first boot.
     pub admin_secret: Option<String>,
+    /// Enables the local developer GraphQL console at /graphql/console.
+    pub graphql_console_enabled: bool,
 }
 
 impl Config {
@@ -33,6 +35,18 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(ADMIN_ENTITY_ID),
             admin_secret: std::env::var("ADMIN_SECRET").ok(),
+            graphql_console_enabled: env_bool("ATOM_GRAPHQL_CONSOLE_ENABLED"),
         })
     }
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }

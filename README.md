@@ -47,6 +47,14 @@ The dev Docker image serves Atom on `http://localhost:8081`; because it is built
 
 GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Bearer token authentication as REST.
 
+`/graphql/playground` is the simple debug playground. `/graphql/console` is the Atom GraphQL Console: a local developer console for login, GraphQL introspection, operation generation, generic builders, and request execution. Enable it explicitly with:
+
+```bash
+ATOM_GRAPHQL_CONSOLE_ENABLED=true
+```
+
+The console is disabled by default and uses GraphQL introspection only; it does not inspect raw database tables. It is generic Atom only and does not provide Magistrala-specific mutations.
+
 The dev playground is preloaded with helper tabs for:
 
 - logging in
@@ -175,6 +183,7 @@ Magistrala mapping uses generic Atom operations:
 | `JWT_EXPIRY_SECS`| `3600`                                     | JWT lifetime in seconds         |
 | `ADMIN_SECRET`   | *(optional)*                               | Seeds admin password on first boot |
 | `ADMIN_ENTITY_ID`| `00000000-0000-0000-0000-000000000001`     | Override seeded admin UUID      |
+| `ATOM_GRAPHQL_CONSOLE_ENABLED` | `false`                     | Enables `/graphql/console` developer console |
 | `RUST_LOG`       | `info`                                     | Log level filter                |
 
 ---

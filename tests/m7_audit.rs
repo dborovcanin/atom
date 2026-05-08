@@ -174,6 +174,7 @@ async fn successful_login_emits_auth_login_allow_with_entity_id() {
         jwt_expiry_secs: 3600,
         admin_entity_id: entity_id,
         admin_secret: None,
+        graphql_console_enabled: false,
     };
 
     let resp = service::login_password(
