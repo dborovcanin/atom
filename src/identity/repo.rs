@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::{
     error::{db_err, AppError},
     models::{
-        entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership},
-        enums::{EntityKind, EntityStatus},
+        entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
+        enums::EntityKind,
         group::{CreateGroup, Group, GroupList, ListGroups, UpdateGroup},
         session::Session,
     },
@@ -143,31 +143,33 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     Ok(EntityList { items, total })
 }
 
-pub async fn update_entity(
-    pool: &PgPool,
-    id: Uuid,
-    name: Option<String>,
-    status: Option<EntityStatus>,
-    attributes: Option<Value>,
-) -> Result<Entity, AppError> {
-    let attributes = attributes.map(normalize_attributes);
+pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result<Entity, AppError> {
+    let attributes = req.attributes.map(normalize_attributes);
     if let Some(attrs) = attributes.as_ref() {
         validate_existing_entity_attributes(pool, id, attrs).await?;
     }
 
     sqlx::query_as::<_, Entity>(
         r#"UPDATE entities
-           SET name       = COALESCE($2, name),
-               status     = COALESCE($3, status),
-               attributes = COALESCE($4, attributes),
-               updated_at = now()
+           SET name               = COALESCE($2, name),
+               kind               = COALESCE($3, kind),
+               tenant_id          = COALESCE($4, tenant_id),
+               profile_id         = COALESCE($5, profile_id),
+               profile_version_id = COALESCE($6, profile_version_id),
+               status             = COALESCE($7, status),
+               attributes         = COALESCE($8, attributes),
+               updated_at         = now()
            WHERE id = $1
            RETURNING id, kind, name, tenant_id, profile_id, profile_version_id,
                      status, attributes, created_at, updated_at"#,
     )
     .bind(id)
-    .bind(name)
-    .bind(status)
+    .bind(req.name)
+    .bind(req.kind)
+    .bind(req.tenant_id)
+    .bind(req.profile_id)
+    .bind(req.profile_version_id)
+    .bind(req.status)
     .bind(attributes)
     .fetch_one(pool)
     .await

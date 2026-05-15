@@ -699,6 +699,14 @@ impl Capability {
     async fn description(&self) -> Option<&str> {
         self.0.description.as_deref()
     }
+
+    async fn created_at(&self) -> String {
+        timestamp(self.0.created_at)
+    }
+
+    async fn updated_at(&self) -> String {
+        timestamp(self.0.updated_at)
+    }
 }
 
 pub struct PolicyBinding(pub PolicyBindingData);
@@ -905,6 +913,10 @@ pub struct CreateEntityInput {
 #[derive(InputObject)]
 pub struct UpdateEntityInput {
     pub name: Option<String>,
+    pub kind: Option<GqlEntityKind>,
+    pub tenant_id: Option<ID>,
+    pub profile_id: Option<ID>,
+    pub profile_version_id: Option<ID>,
     pub status: Option<GqlEntityStatus>,
     pub attributes: Option<Value>,
 }
@@ -1032,6 +1044,13 @@ pub struct UpdateRoleInput {
 #[derive(InputObject)]
 pub struct CreateCapabilityInput {
     pub name: String,
+    pub resource_kind: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(InputObject)]
+pub struct UpdateCapabilityInput {
+    pub name: Option<String>,
     pub resource_kind: Option<String>,
     pub description: Option<String>,
 }

@@ -143,6 +143,7 @@ impl EntityMutation {
             &[
                 ("manage", Scope::Object(id)),
                 ("manage", scope_for_tenant(existing.tenant_id)),
+                ("write", scope_for_tenant(existing.tenant_id)),
             ],
         )
         .await?;
@@ -150,9 +151,18 @@ impl EntityMutation {
         let entity = repo::update_entity(
             &state.pool,
             id,
-            input.name,
-            input.status.map(Into::into),
-            input.attributes,
+            entity_model::UpdateEntity {
+                name: input.name,
+                kind: parse_optional_entity_kind(input.kind),
+                tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
+                profile_id: parse_optional_id(input.profile_id, "profileId")?,
+                profile_version_id: parse_optional_id(
+                    input.profile_version_id,
+                    "profileVersionId",
+                )?,
+                status: input.status.map(Into::into),
+                attributes: input.attributes,
+            },
         )
         .await
         .map_err(gql_error)?;
@@ -180,6 +190,14 @@ impl EntityMutation {
             .await
             .map_err(gql_error)?;
         Ok(true)
+    }
+
+    async fn enable_entity(&self, ctx: &Context<'_>, id: ID) -> Result<Entity> {
+        change_entity_status(ctx, id, crate::models::enums::EntityStatus::Active).await
+    }
+
+    async fn disable_entity(&self, ctx: &Context<'_>, id: ID) -> Result<Entity> {
+        change_entity_status(ctx, id, crate::models::enums::EntityStatus::Inactive).await
     }
 
     async fn add_ownership(
@@ -221,6 +239,44 @@ impl EntityMutation {
             .map_err(gql_error)?;
         Ok(true)
     }
+}
+
+async fn change_entity_status(
+    ctx: &Context<'_>,
+    id: ID,
+    status: crate::models::enums::EntityStatus,
+) -> Result<Entity> {
+    let auth = require_auth(ctx)?;
+    let state = ctx.data::<AppState>()?;
+    let entity_id = parse_id(id, "id")?;
+    let existing = repo::get_entity(&state.pool, entity_id)
+        .await
+        .map_err(gql_error)?;
+    require_any_capability(
+        &state.pool,
+        auth.entity_id,
+        &[
+            ("manage", scope_for_tenant(existing.tenant_id)),
+            ("write", scope_for_tenant(existing.tenant_id)),
+        ],
+    )
+    .await?;
+    let entity = repo::update_entity(
+        &state.pool,
+        entity_id,
+        entity_model::UpdateEntity {
+            name: None,
+            kind: None,
+            tenant_id: None,
+            profile_id: None,
+            profile_version_id: None,
+            status: Some(status),
+            attributes: None,
+        },
+    )
+    .await
+    .map_err(gql_error)?;
+    Ok(entity.into())
 }
 
 async fn require_ownership_manage(
