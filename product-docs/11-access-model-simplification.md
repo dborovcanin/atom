@@ -1,148 +1,44 @@
 # Atom Access Model
 
-## Status: Draft
-## Date: 2026-05-21
+## Status: Authoritative Draft
+## Date: 2026-05-26
 
-This document defines the simplified Atom access model. It is the product direction for new UI, GraphQL, database, and Magistrala integration work.
+This document is the product source of truth for Atom authorization.
 
----
-
-## One-line model
+## One-line Model
 
 ```text
-Assign a Role to an Entity or Principal Group.
-The Role says what actions apply to which objects inside a Tenant or Object Group.
+Subject gets a Role.
+Role contains Permission Blocks.
+Direct Policy gives a Subject one Permission Block directly.
+Permission Block is the only place where scope + actions are defined.
 ```
 
----
+## Vocabulary
 
-## Concepts
+| Term | Meaning |
+|---|---|
+| Action | Atomic operation, formerly called Capability. |
+| Action Applicability | Which object kinds/types support an action. |
+| Permission Block | Scope + actions + effect + conditions. Single source of permission logic. |
+| Role | Named collection of Permission Blocks. |
+| Role Assignment | Gives a Role to an Entity or Principal Group. Has no scope. |
+| Direct Policy | Gives one Permission Block directly to an Entity or Principal Group. Has no duplicated scope/actions. |
+| Principal Group | Who-container: users, services, devices, applications, workloads. |
+| Object Group | Where-container: clients, channels, resources, child Object Groups. |
 
-### Tenant
+## Core Rules
 
-Tenant is the top boundary.
+- Scope lives only in Permission Blocks.
+- Actions live only in Permission Blocks through `permission_block_actions`.
+- Roles do not have scope or direct action rows.
+- Role Assignments do not have scope or direct action rows.
+- Direct Policies do not duplicate scope/actions; they reference a Permission Block.
+- Permission Block is the single source of truth for runtime authorization, role-based access, direct grants, deny rules, and conditions.
 
-In Magistrala:
+## Actions
 
-```text
-Tenant = Domain
-```
-
-Tenant owns normal application objects such as clients, channels, rules, reports, alarms, Object Groups, Principal Groups, and tenant roles.
-
-### Entity
-
-Entity is an identity.
-
-Kinds:
-
-```text
-human
-device
-service
-workload
-application
-```
-
-An entity can be a subject that receives access. Some entities, such as devices, are also protected objects that other entities can manage.
-
-Human users are global by default. Their tenant participation is represented through tenant membership and role assignments, not by duplicating the same human in each tenant.
-
-Services are entities too. A service can receive roles directly or through a Principal Group, including platform roles for cross-tenant automation.
-
-### Resource
-
-Resource is an application object protected by Atom authorization.
-
-Examples:
-
-```text
-channel
-rule
-report
-alarm
-custom application object
-```
-
-Clients/devices are not resources. They are entities with `kind = device` or `kind = service`.
-
-### Object Group
-
-Object Group is a boundary/container for protected objects inside a tenant.
-
-It answers:
-
-```text
-where does this role apply?
-```
-
-It can contain:
-
-```text
-clients/devices
-channels
-rules
-reports
-alarms
-child Object Groups
-```
-
-Object Group supports nesting:
-
-```text
-Tenant Factory-1
-  Object Group Plant-A
-    Object Group Line-1
-      client1
-      channel1
-    Object Group Line-2
-      client2
-      channel2
-```
-
-Rules:
-
-- Object Group is not a subject that receives roles.
-- Object Group containment alone grants no access.
-- One object belongs to one Object Group in V1.
-- Nested Object Groups are used only for boundary matching.
-
-### Principal Group
-
-Principal Group is a collection of identities.
-
-It answers:
-
-```text
-who receives this role?
-```
-
-It can contain:
-
-```text
-users
-services
-applications
-workloads
-devices if needed
-```
-
-Examples:
-
-```text
-Principal Group Operators = user1, user2
-Principal Group MG Services = mg-service, reports-service
-```
-
-Rules:
-
-- Principal Group is a subject that can receive role assignments.
-- Principal Group is not an object boundary.
-- Principal Groups are flat in V1.
-
-### Capability
-
-Capability is a global action name.
+Action is a global operation name.
 
 Examples:
 
@@ -159,9 +55,12 @@ policy.manage
 credential.manage
 audit.read
 tenant.manage
+tenant.create
+signing_key.rotate
+authz.check
 ```
 
-Do not create object-specific capability names such as:
+Do not create object-specific action names such as:
 
 ```text
 client_read
@@ -169,267 +68,292 @@ channel_publish
 report_execute
 ```
 
-### Capability Applicability
-
-Capability Applicability says which object types support which actions.
-
-It validates the role model. It does not grant access.
+Action Applicability validates where an action is valid. It does not grant access.
 
 Examples:
 
 ```text
-publish -> channel
-subscribe -> channel
-execute -> rule/report
-read/write/delete -> clients/channels/groups/rules/reports/alarms
-credential.manage -> entity credentials
-tenant.manage -> tenant lifecycle
+publish -> resource:channel
+subscribe -> resource:channel
+execute -> resource:rule, resource:report
+read/write/delete -> supported protected objects
 ```
 
-If a role tries to add an invalid pair, Atom rejects it.
+## Permission Blocks
+
+Permission Block is the atomic permission unit.
+
+```text
+permission_block =
+  tenant boundary +
+  scope mode +
+  optional object kind/type/id +
+  optional object group boundary +
+  effect +
+  conditions +
+  actions
+```
+
+Permission Block fields:
+
+```text
+tenant_id
+scope_mode
+object_kind
+object_type
+object_id
+group_id
+effect
+conditions
+```
+
+Actions are linked through:
+
+```text
+permission_block_actions(permission_block_id, action_id)
+```
+
+## Scope Modes
+
+Scope modes live only in Permission Blocks.
+
+| Scope mode | Meaning |
+|---|---|
+| `platform` | Global/platform. |
+| `tenant` | Tenant/domain object itself. |
+| `object_kind` | All objects of one kind in a tenant. |
+| `object_type` | All objects of one type in a tenant. |
+| `object` | One exact entity/resource/object. |
+| `group` | Object Group itself. |
+| `group_direct_objects` | Entities/resources directly inside an Object Group. |
+| `group_descendant_objects` | Entities/resources inside child/deeper Object Groups. |
+| `group_child_groups` | Immediate child Object Groups themselves. |
+| `group_descendant_groups` | Child/deeper Object Groups themselves. |
 
 Examples:
 
 ```text
-publish on client -> invalid
-execute on channel -> invalid
+tenant_id = d1
+scope_mode = tenant
+=> tenant/domain d1 itself
 ```
-
-### Role
-
-Role contains permission blocks.
-
-Each permission block says:
 
 ```text
-where it applies + actions
+tenant_id = d1
+scope_mode = object_type
+object_kind = resource
+object_type = resource:channel
+=> all channels in tenant d1
 ```
 
-Example:
+```text
+tenant_id = d1
+scope_mode = group_direct_objects
+object_kind = resource
+object_type = resource:channel
+group_id = g1
+=> channels directly inside Object Group g1
+```
+
+## Roles
+
+Role is a business-facing name for a set of Permission Blocks.
 
 ```text
 Role: Plant-A Operator
 
-Permission block 1:
-  Applies to: clients in Object Group Plant-A
+Permission Block 1:
+  Scope: clients in Object Group Plant-A
   Actions: read, write
 
-Permission block 2:
-  Applies to: channels in Object Group Plant-A
+Permission Block 2:
+  Scope: channels in Object Group Plant-A
   Actions: read, publish, subscribe
 ```
 
-Normal roles belong to one tenant:
+Role links Permission Blocks:
 
 ```text
-role.tenant_id = tenant.id
+role_permission_blocks(role_id, permission_block_id)
 ```
 
-Platform roles are tenant-free and reserved for system, admin, and service automation.
+Roles have no scope columns and no direct action columns.
 
-### Assignment
+## Role Assignments
 
-Assignment gives a role to a subject.
+Role Assignment grants a Role to a subject.
 
 Subject can be:
 
+- Entity
+- Principal Group
+
+Role Assignment fields:
+
 ```text
-single entity
-principal group
+tenant_id
+subject_kind
+subject_id
+role_id
 ```
+
+Role Assignment has no scope and no action rows.
+
+## Direct Policies
+
+Direct Policy grants one Permission Block directly to a subject.
+
+It exists for advanced/internal cases:
+
+- client-channel publish/subscribe links
+- service grants
+- explicit deny rules
+- temporary or conditional grants
+- break-glass access
+
+Direct Policy fields:
+
+```text
+tenant_id
+subject_kind
+subject_id
+permission_block_id
+```
+
+Direct Policy does not duplicate scope, actions, effect, or conditions. Those come from the referenced Permission Block.
+
+## Principal Groups
+
+Principal Group is a who-container.
+
+It can contain:
+
+- humans
+- services
+- applications
+- workloads
+- devices if needed
+
+Principal Group is a subject for Role Assignments and Direct Policies.
+
+Principal Group is not an Object Group and is not used as a scope boundary.
+
+## Object Groups
+
+Object Group is a where-container.
+
+It can contain:
+
+- entities such as clients/devices
+- resources such as channels, rules, reports, alarms
+- child Object Groups
+
+Object Group containment alone grants no access. It only affects whether a Permission Block scope matches a protected object.
+
+One object belongs to one Object Group in V1.
+
+## Effective Authorization
+
+Atom evaluates both access paths into one effective permission shape:
+
+```text
+Role path:
+  subject -> role_assignment -> role -> permission_block -> actions
+
+Direct path:
+  subject -> direct_policy -> permission_block -> actions
+```
+
+The PDP must treat these paths as one logical source:
+
+```text
+effective_permissions =
+  role assignment path
+  UNION ALL
+  direct policy path
+```
+
+Decision:
+
+1. Resolve the requested action and protected object.
+2. Find matching effective permissions.
+3. If any matching deny exists, deny.
+4. If any matching allow exists, allow.
+5. Otherwise deny.
+
+## Listing Authorization Semantics
+
+All normal list queries are read-filtered.
+
+A caller does not need a separate `list` action to list normal objects. A record appears in a list response only if the caller has `read` access to that specific record.
 
 Examples:
 
-```text
-Assign Plant-A Operator to user1
-Assign Plant-A Operator to Principal Group Operators
-Assign MG Cross Tenant Service to mg-service
-```
+- `channels` query returns channels the caller can `read`.
+- `entities` query returns entities the caller can `read`.
+- `objectGroups` query returns Object Groups the caller can `read`.
 
-Assignment has no scope. The role already defines where access applies.
+Listing must not:
 
-Rules:
+- fetch all tenant rows and call PDP once per row.
+- compute total count before authorization filtering.
+- leak unreadable object IDs, names, counts, or ordering position.
 
-- Role tenant must match subject tenant context.
-- Principal Group tenant must match role tenant.
-- Cross-tenant assignment is allowed only for platform/system roles.
-- Normal UI should show "assignment", not "policy binding".
+Listing must:
 
----
+- apply authorization inside SQL or equivalent DB-side query logic.
+- include direct policies.
+- include reusable permissions through role assignments.
+- include entity assignments.
+- include Principal Group assignments.
+- include nested Principal Group membership if hierarchy is enabled.
+- include Object Group scopes.
+- support deny-overrides-allow.
+- apply search/sort/pagination after authorization filtering.
 
-## Authorization Flow
+Separate actions such as `policy.manage`, `role.manage`, or `assignment.manage` are only for managing access-control objects themselves, not for listing ordinary domain objects.
 
-Question:
+## Validation Rules
 
-```text
-Can user1 publish to channel1?
-```
+- Platform Permission Blocks require `tenant_id = NULL`.
+- Non-platform Permission Blocks require `tenant_id`.
+- Role and Permission Block tenants must match, except platform roles/blocks use `NULL`.
+- Role Assignment tenant must match Role tenant.
+- Direct Policy tenant must match Permission Block tenant.
+- Subject Entity tenant must match assignment/direct-policy tenant, except global entities may receive tenant access through active tenant membership.
+- Subject Principal Group must belong to the same tenant.
+- Object Group scope must reference an Object Group in the same tenant.
+- Object target must belong to the Permission Block tenant.
+- Every action in a Permission Block must be valid for that Permission Block scope using Action Applicability.
 
-Atom evaluates:
+## Product UI Language
 
-1. `publish` is valid for `channel`.
-2. `user1` is active.
-3. `user1` has a direct role assignment or belongs to a Principal Group with a role assignment.
-4. The assigned role has a permission block that applies to `channel1`.
-5. Optional advanced conditions match.
-6. Any matching deny overrides allow.
-7. If no allow matches, deny.
-
-Example:
-
-```text
-user1 is in Principal Group Operators
-Operators has Plant-A Operator role
-Plant-A Operator allows publish on channels in Object Group Plant-A
-channel1 is inside Plant-A
-=> allowed
-```
-
----
-
-## Listing Rule
-
-Atom should not require a separate `list` capability for normal object listing.
-
-Listing means:
+Normal UI should expose:
 
 ```text
-return objects the caller can read
-```
-
-This must be implemented with SQL authorization filtering. Atom must not load every object and call the PDP one by one.
-
-Examples:
-
-```text
-List clients in tenant -> return clients where caller has read access
-List channels in Object Group -> return channels where caller has read access
-```
-
----
-
-## Advanced Features
-
-Deny and conditions remain part of the security model, but normal UI should focus on allow assignments.
-
-### Internal Policy Records
-
-Under the hood, Atom may use internal policy records for advanced/security behavior. This keeps the normal product model simple while allowing precise runtime links and security controls.
-
-Internal policy record types:
-
-```text
-role assignment policy = gives a role to an entity or Principal Group
-direct capability policy = trusted subject/action/object grant
-deny/conditional policy = advanced security rule
-```
-
-Direct capability grants are trusted internal policy records. They may be used for machine-created runtime links, such as strict client-channel publish/subscribe connections.
-
-Conceptual direct capability policy shape:
-
-```text
-subject = entity or Principal Group
-action = capability
-object = protected entity/resource/Object Group/tenant
-effect = allow or deny
-conditions = optional advanced rules
-```
-
-Example for a Magistrala client-channel link:
-
-```text
-subject = client entity
-action = publish or subscribe
-object = channel resource
-effect = allow
-```
-
-Guardrails:
-
-- Not exposed in normal UI.
-- Created only by trusted service/system flows.
-- Audited.
-- Not used as the main role model.
-- No separate `direct_grants` table; direct capability grants reuse the internal policy model.
-
----
-
-## Clean Schema Direction
-
-Future clean schema should model these concepts directly:
-
-```text
-tenants
-entities
-resources
-object_groups
-object_group_hierarchy
-object_group_entities
-object_group_resources
-principal_groups
-principal_group_members
-capabilities
-capability_applicability
-roles
-role_permission_blocks
-role_permission_actions
-role_assignments
-```
-
-The normal product model should remove:
-
-```text
-roles.scope_kind
-roles.scope_ref
-policy scope for role assignments
-capabilities.resource_kind
-role_capabilities as the direct role model
-role_composites
-one overloaded groups table/API
-```
-
-Advanced/security backing may still use internal policy records. Normal UI must hide policy internals and expose Roles, Assignments, Principal Groups, and Object Groups instead.
-
----
-
-## UI Language
-
-Normal UI should show:
-
-```text
-Tenants / Domains
-Entities
-Resources
-Object Groups
-Principal Groups
+Actions
+Permission Blocks
 Roles
-Assignments
-Capabilities
+Role Assignments
+Principal Groups
+Object Groups
 ```
 
-Normal UI should not show:
+Advanced/security UI may expose:
 
 ```text
+Direct Policies
+Deny Permission Blocks
+Conditional Permission Blocks
+```
+
+Avoid normal user-facing terms:
+
+```text
+Capability
+PolicyBinding
 scope_kind
 scope_ref
-policy scope
-resource_kind on capability
-simple role
-composite role
-direct capability policy
+overloaded Group
 ```
 
-Role form should look like:
-
-```text
-Role name: Plant-A Operator
-
-Permissions:
-[Applies to: Clients in Plant-A] [Actions: read, write]
-[Applies to: Channels in Plant-A] [Actions: publish, subscribe]
-
-Assignments:
-[user1]
-[Principal Group Operators]
-```

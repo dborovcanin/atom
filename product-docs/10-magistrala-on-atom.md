@@ -13,7 +13,7 @@ Magistrala should not maintain a separate identity, credential, role, group, pol
 
 The rule is:
 
-- Atom owns generic security fields: `id`, `name`, `kind`, `tenant_id`, `status`, credentials, Object Groups, Principal Groups, capabilities, roles, assignments, sessions, and audit logs.
+- Atom owns generic security fields: `id`, `name`, `kind`, `tenant_id`, `status`, credentials, Object Groups, Principal Groups, actions, roles, assignments, sessions, and audit logs.
 - Magistrala owns application-specific fields inside `attributes.magistrala`.
 - Runtime access decisions always go through Atom authorization checks.
 - Listings return objects the caller can `read`; Atom must apply authorization filtering in SQL.
@@ -39,7 +39,7 @@ See also: [Atom access model](./11-access-model-simplification.md).
 | User/service set | Principal Group | Contains users, services, apps, workloads, or devices that should receive the same roles. |
 | MG role | Atom Role | Role has permission blocks: applies-to + actions. |
 | MG role member | Atom Assignment | Assignment gives a role to an entity or Principal Group. |
-| Client-channel connection | Role assignment or trusted internal policy-backed direct capability grant | Normal UI should prefer roles; strict runtime links may use audited internal policy records. |
+| Client-channel connection | Role assignment or trusted Direct Policy | Normal UI should prefer roles; strict runtime links may use audited Direct Policies. |
 
 ---
 
@@ -272,11 +272,11 @@ Normal roles belong to one tenant. Platform roles are reserved for system/admin/
 
 ---
 
-## Capabilities
+## Actions
 
-Capabilities are global action names.
+Actions are global action names.
 
-Use canonical Atom capability names:
+Use canonical Atom action names:
 
 ```text
 read
@@ -302,7 +302,7 @@ group_set_parent
 report_execute
 ```
 
-Capability Applicability validates action/object pairs:
+Action Applicability validates action/object pairs:
 
 ```text
 publish -> channel
@@ -326,28 +326,27 @@ Assignment:
   Give Temperature Publisher to client sensor-001
 ```
 
-For strict runtime-only links, a trusted Magistrala service may create an internal policy-backed direct capability grant:
+For strict runtime-only links, a trusted Magistrala service may create a Direct Policy:
 
 ```text
 sensor-001 can publish to temperature
 ```
 
-This is generic Atom behavior, not a Magistrala-specific table. Atom stores the link as an internal policy record:
+This is generic Atom behavior, not a Magistrala-specific table. Atom stores the link as a Direct Policy that references a Permission Block:
 
 ```text
-subject = client entity
-action = publish or subscribe
-object = channel resource
-effect = allow
+Direct Policy:
+  subject = client entity
+  permission_block = publish/subscribe block for channel resource
 ```
 
 Guardrails:
 
-- Direct grants are not exposed in normal UI.
-- Direct grants are created only by trusted service/system flows.
-- Direct grants are audited.
+- Direct Policies are not exposed in normal UI.
+- Direct Policies are created only by trusted service/system flows.
+- Direct Policies are audited.
 - Roles and assignments remain the main model.
-- No separate `direct_grants` table is needed.
+- No separate MG-specific `direct_grants` table is needed.
 
 ---
 
@@ -399,7 +398,7 @@ Rule:
 Listing = return objects the caller can read
 ```
 
-Do not require a separate `list` capability for normal object listing.
+Do not require a separate `list` action for normal object listing.
 
 Do not fetch all objects and call authorization one by one. Atom/MG must apply authorization filters in SQL.
 

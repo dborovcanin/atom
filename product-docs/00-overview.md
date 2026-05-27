@@ -57,7 +57,7 @@ These questions apply to all entity kinds equally — humans, devices, services,
 | 5 | `POST /authz/check/bulk` | Authorization | Check multiple actions in one call |
 | 6 | `GET /roles/:id/holders` | Role-centric | Who holds this role? |
 | 7 | Principal Group access query | Principal Group-centric | What access does this Principal Group grant? |
-| 8 | `GET /entities/:id/effective-capabilities` | Entity-centric | Flat resolved capability list |
+| 8 | Entity effective actions query | Entity-centric | Flat resolved action/source list |
 
 ### Priority 3 — Nice-to-have
 
@@ -77,7 +77,7 @@ All query endpoints follow these rules:
 - **Authenticated** — all require a valid Bearer token.
 - **Paginated** — list endpoints accept `limit` (1-100, default 20) and `offset` (default 0).
 - **Resolved responses** — responses include names and details, not just UUIDs.
-- **Source tracking** — where access comes from multiple paths (direct vs. group, capability vs. role), the response shows the source.
+- **Source tracking** — where access comes from multiple paths, the response shows the Role Assignment, Direct Policy, Permission Block, and Principal Group source.
 - **Tenant-aware filters** — most endpoints accept an optional `tenant_id` filter.
 
 ---
@@ -116,7 +116,7 @@ Each endpoint is specified in its own document:
 5. [POST /authz/check/bulk](./05-bulk-check.md)
 6. [GET /roles/:id/holders](./06-role-holders.md)
 7. [Principal Group access](./07-group-access.md)
-8. [GET /entities/:id/effective-capabilities](./08-effective-capabilities.md)
+8. [Entity effective actions](./08-effective-actions.md)
 9. [Admin hygiene endpoints](./09-admin-hygiene.md)
 10. [Building Magistrala on Atom](./10-magistrala-on-atom.md)
 11. [Atom access model](./11-access-model-simplification.md)

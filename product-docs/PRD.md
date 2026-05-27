@@ -42,7 +42,7 @@ Atom provides three main product areas:
 
    Atom decides what the caller can do:
 
-   - capabilities;
+   - actions;
    - roles;
    - assignments;
    - RBAC;
@@ -78,7 +78,7 @@ The current project needs a single PRD because the important product intent is s
 1. Provide a compact identity and authorization service that is simple to deploy, operate, and reason about.
 2. Support humans, devices, services, workloads, and applications using one consistent entity model.
 3. Support password login, JWT sessions, API keys, and future credential types without changing the core entity model.
-4. Provide role-based authorization with assignments, optional ABAC conditions, trusted internal policy-backed direct capability grants, and deny-overrides semantics.
+4. Provide role-based authorization with assignments, optional ABAC conditions, trusted Direct Policies, and deny-overrides semantics.
 5. Make tenants first-class isolation boundaries, with Magistrala domains mapping directly to Atom tenants.
 6. Keep authorization online: every access decision is evaluated against current database state.
 7. Provide explain, access listing, audit, and hygiene endpoints so operators can understand and maintain access state.
@@ -180,7 +180,7 @@ Entities, resources, Object Groups, Principal Groups, and roles can belong to a 
 When a tenant is created, Atom must bootstrap tenant administration:
 
 - create a tenant-owned role named `tenant-admin`;
-- grant that role tenant administration capability for the created tenant;
+- grant that role tenant administration action for the created tenant;
 - bind that role to the entity that created the tenant.
 
 The generated `tenant-admin` role is the starting administrative role for that tenant. It is not a hardcoded global role. A tenant admin can later create other tenant-owned roles such as `tenant-manager`, `operator`, `viewer`, or `auditor`.
@@ -221,7 +221,7 @@ The generated `tenant-admin` role should include permission blocks for:
 
 The seeded `tenant-admin` role intentionally does not include platform `tenant.manage`. A tenant admin cannot rename, freeze, or delete their own tenant unless a platform admin explicitly delegates that ability.
 
-Device and workload runtime permissions should normally be granted through roles and assignments, or through trusted internal policy-backed direct capability grants for strict runtime links such as client-channel publish/subscribe.
+Device and workload runtime permissions should normally be granted through roles and assignments, or through trusted Direct Policies for strict runtime links such as client-channel publish/subscribe.
 
 Example:
 
@@ -238,7 +238,7 @@ Risky:
 device sensor-1 receives broad tenant administration access.
 ```
 
-By default, capability applicability and guardrails should prevent devices from receiving broad tenant-level administration capabilities such as `manage`, `write`, or `delete`.
+By default, action applicability and guardrails should prevent devices from receiving broad tenant-level administration actions such as `manage`, `write`, or `delete`.
 
 ### Entity
 
@@ -329,7 +329,7 @@ Examples:
 
 This avoids treating every manageable entity as a separate application resource. The same record can act as a subject in one request and be protected as an object in another request.
 
-Entity subtypes are not separate protected object kinds. Atom should use `object_kind = "entity"` plus an entity-kind filter when a role permission block or authorization check targets humans, devices, services, workloads, or applications.
+Entity subtypes are not separate protected object kinds. Atom should use `object_kind = "entity"` plus an entity-kind filter when a Permission Block or authorization check targets humans, devices, services, workloads, or applications.
 
 Examples:
 
@@ -471,9 +471,9 @@ Principal Group rules:
 - Principal Group is not an object boundary.
 - Principal Groups are flat in V1.
 
-### Capability
+### Action
 
-A capability is a global action name such as:
+An action is a global action name such as:
 
 - `read`
 - `write`
@@ -489,7 +489,7 @@ A capability is a global action name such as:
 - `role.manage`
 - `tenant.manage`
 
-Do not create object-specific capability names such as:
+Do not create object-specific action names such as:
 
 ```text
 client_read
@@ -499,11 +499,11 @@ report_execute
 
 The action is global. Applicability decides where the action is valid.
 
-Capabilities are not limited to the list above. The seeded set should cover common platform, tenant administration, and runtime use cases. Product-specific capabilities may be added by platform administrators.
+Actions are not limited to the list above. The seeded set should cover common platform, tenant administration, and runtime use cases. Product-specific actions may be added by platform administrators.
 
-Recommended capability groups:
+Recommended action groups:
 
-| Group | Capabilities | Purpose |
+| Group | Actions | Purpose |
 |---|---|---|
 | General object access | `read`, `write`, `delete`, `manage` | Administrative CRUD and object management |
 | Messaging/runtime | `publish`, `subscribe`, `execute` | Device, workload, and service runtime operations |
@@ -512,17 +512,17 @@ Recommended capability groups:
 | Tenant administration | `tenant.manage`, `manage` | Tenant lifecycle and tenant-scoped administration |
 | Audit | `audit.read` | Audit log access |
 
-Devices should normally receive only runtime-oriented capabilities such as `publish`, `subscribe`, and limited `read` for configuration or state. Devices should not receive administrative capabilities such as `manage`, `write`, or `delete` by default.
+Devices should normally receive only runtime-oriented actions such as `publish`, `subscribe`, and limited `read` for configuration or state. Devices should not receive administrative actions such as `manage`, `write`, or `delete` by default.
 
-### Capability Applicability
+### Action Applicability
 
-Capability Applicability says which object types support which actions.
+Action Applicability says which object types support which actions.
 
 It validates the role model. It does not grant access.
 
 Examples:
 
-| Capability | Valid objects |
+| Action | Valid objects |
 |---|---|
 | `read`, `write`, `delete` | common protected objects such as entities, resources, Object Groups, rules, reports, and alarms |
 | `publish`, `subscribe` | channels |
@@ -531,7 +531,7 @@ Examples:
 | `tenant.manage` | tenant lifecycle |
 | `role.manage`, `policy.manage` | roles and assignments |
 
-Invalid capability/object pairs must be rejected:
+Invalid action/object pairs must be rejected:
 
 ```text
 publish on client -> invalid
@@ -553,7 +553,7 @@ The **kind** (`object_kind`) is the broad category. The canonical set is:
 - `credential`
 - `audit_log`
 
-`capability` is a definition rather than a protected runtime object and is not in this set; capability mutation is governed by `policy.manage` and `role.manage`.
+`action` is a definition rather than a protected runtime object and is not in this set; action mutation is governed by `policy.manage` and `role.manage`.
 
 The **type** (`object_type`) is the finer sub-kind, written as `<kind>:<sub-kind>`:
 
@@ -564,17 +564,29 @@ For kinds without sub-kinds (`group`, `tenant`, `role`, `policy`, `credential`, 
 
 The kind prefix on `object_type` is intentionally redundant with `object_kind` so that audit logs and explain output are self-describing. Bare values such as `device` or `channel` must not appear as stored object type values or in audit records.
 
-These values must be used consistently across capability applicability, role permission blocks, authorization checks, guardrail rules, and audit logs.
+These values must be used consistently across action applicability, Permission Blocks, authorization checks, guardrail rules, and audit logs.
 
-### Role
+### Permission Block
 
-A role is a named set of permission blocks.
+A Permission Block is the atomic permission unit and the only source of scope plus actions.
 
 Each permission block says:
 
 ```text
 where it applies + actions
 ```
+
+It also carries:
+
+```text
+tenant boundary + effect + optional conditions
+```
+
+Permission Block is reused by both roles and direct policies. Neither roles nor direct policies duplicate scope/action fields.
+
+### Role
+
+A role is a named collection of Permission Blocks.
 
 Example:
 
@@ -636,43 +648,36 @@ Assign Plant-A Operator to Principal Group Operators
 Assign MG Cross Tenant Service to mg-service
 ```
 
-### Advanced Policy Features
+### Direct Policy
 
-Under the hood, Atom may still represent assignments and advanced security rules as policy records. That internal representation must not leak into normal product language.
+Direct Policy is an advanced/security feature for granting one Permission Block directly to a subject.
 
-Deny and ABAC conditions remain part of the security model, but normal UI should focus on allow role assignment.
-
-Direct capability grants are trusted internal policy records. They may be used for machine-created runtime links, such as strict client-channel publish/subscribe connections.
-
-Internal policy record types:
+It connects:
 
 ```text
-role assignment policy = gives a role to an entity or Principal Group
-direct capability policy = trusted subject/action/object grant
-deny/conditional policy = advanced security rule
+subject -> permission block
 ```
 
-Conceptual direct capability policy shape:
+Direct Policy has no duplicated scope, action, effect, or condition fields. Those live only in the referenced Permission Block.
 
-```text
-subject = entity or Principal Group
-action = capability
-object = protected entity/resource/Object Group/tenant
-effect = allow or deny
-conditions = optional advanced rules
-```
+Direct Policies may be used for:
+
+- machine-created runtime links, such as strict client-channel publish/subscribe connections;
+- service grants;
+- explicit deny rules;
+- temporary or conditional access;
+- break-glass access.
 
 Guardrails:
 
-- Direct capability grants are not exposed in normal UI.
-- Direct capability grants are created only by trusted service/system flows.
-- Direct capability grants are audited.
-- The main role model remains role permission blocks plus assignments.
-- Atom must not add a separate `direct_grants` table; direct capability grants reuse the internal policy model.
+- Direct Policies are not exposed in normal user-facing role assignment UI.
+- Direct Policies are created only by trusted service/system or advanced security flows.
+- Direct Policies are audited.
+- The main product model remains Permission Blocks, Roles, and Role Assignments.
 
 ### Listing Rule
 
-Atom should not require a separate `list` capability for normal object listing.
+Atom should not require a separate `list` action for normal object listing.
 
 Listing means:
 
@@ -781,9 +786,9 @@ Apply this advanced conditional assignment only when a human from operations is 
 
 Top-level fields and attributes are both required. Top-level fields provide stable system facts such as kind, tenant, status, and object type. Attributes provide application-specific facts such as department, region, tags, site, plan, or Magistrala metadata.
 
-### Capability Assignment Guardrails
+### Action Assignment Guardrails
 
-Capabilities are generic. Entity kind describes what the subject is, but entity kind should not directly grant permissions.
+Actions are generic. Entity kind describes what the subject is, but entity kind should not directly grant permissions.
 
 Runtime authorization answers:
 
@@ -791,10 +796,10 @@ Runtime authorization answers:
 Can subject X do action Y on object Z?
 ```
 
-Capability assignment guardrails answer a different question:
+Action assignment guardrails answer a different question:
 
 ```text
-Is it safe to create this assignment, role permission, policy-backed direct capability grant, or Principal Group membership?
+Is it safe to create this Role Assignment, Permission Block, Direct Policy, or Principal Group membership?
 ```
 
 This prevents unsafe access from being created accidentally.
@@ -813,20 +818,20 @@ Guardrails should be evaluated when:
 - creating a role assignment;
 - assigning a role to an entity;
 - assigning a role to a Principal Group;
-- adding an action to a role permission block;
+- adding an action to a Permission Block;
 - adding an entity to a Principal Group that already has role assignments;
 - creating tenant-owned admin roles during tenant creation.
 
-Direct grants, role assignments, and Principal Group membership changes must all be validated. Otherwise unsafe access can be hidden inside a role or inherited through a Principal Group.
+Direct Policies, Role Assignments, Permission Block changes, and Principal Group membership changes must all be validated. Otherwise unsafe access can be hidden inside a role or inherited through a Principal Group.
 
 Recommended storage:
 
 ```sql
-capability_assignment_rules (
+action_assignment_rules (
   id              uuid primary key,
   tenant_id       uuid null,
   entity_kind     text not null,
-  capability_name text not null,
+  action_name text not null,
   object_kind     text not null,
   object_type     text null,
   decision        text not null check (decision in ('allow', 'deny', 'require_override')),
@@ -840,7 +845,7 @@ Field meaning:
 - `tenant_id = null` means the rule is a global default.
 - `tenant_id = <tenant>` means the rule applies only inside that tenant.
 - `entity_kind` is the kind of the subject receiving access.
-- `capability_name` is the action being granted.
+- `action_name` is the action being granted.
 - `object_kind` is the protected object type, such as `resource`, `entity`, `group`, `tenant`, `role`, `policy`, `credential`, or `audit_log`.
 - `object_type` narrows the rule to a specific sub-kind such as `resource:channel` or `entity:device`. Always namespaced with its kind. Null means the rule applies to every sub-kind under the given `object_kind`.
 - `decision = allow` means the assignment is allowed.
@@ -858,7 +863,7 @@ Guardrail management rules:
 
 Example global rules:
 
-| Entity kind | Capability | Object kind | Object type | Decision |
+| Entity kind | Action | Object kind | Object type | Decision |
 |---|---|---|---|---|
 | `device` | `publish` | `resource` | `resource:channel` | `allow` |
 | `device` | `subscribe` | `resource` | `resource:channel` | `allow` |
@@ -869,7 +874,7 @@ Example global rules:
 
 Example tenant-specific rule:
 
-| Tenant | Entity kind | Capability | Object kind | Object type | Decision |
+| Tenant | Entity kind | Action | Object kind | Object type | Decision |
 |---|---|---|---|---|---|
 | `factory-1` | `device` | `read` | `resource` | `resource:device_config` | `allow` |
 
@@ -901,7 +906,7 @@ Response:
 
 ```json
 {
-  "error": "capability_not_allowed_for_entity_kind",
+  "error": "action_not_allowed_for_entity_kind",
   "message": "device entities cannot be granted delete on resource kind channel by default"
 }
 ```
@@ -910,23 +915,23 @@ Example role validation:
 
 - Role `channel-admin` has a permission block with `delete` on channels.
 - An assignment tries to give `channel-admin` to a `device`.
-- Atom expands the role permission blocks during assignment validation.
+- Atom expands the role's Permission Blocks during assignment validation.
 - The assignment is rejected because `device + delete + resource:channel` is denied.
 
 Example Principal Group validation:
 
 - Principal Group `floor-sensors` has an assignment to a role that grants `publish` to channels.
 - Adding a `device` to `floor-sensors` is allowed.
-- If the Principal Group later receives a role with `delete` on channels, Atom must validate all current group members and reject the assignment if devices would inherit a denied capability.
+- If the Principal Group later receives a role with `delete` on channels, Atom must validate all current group members and reject the assignment if devices would inherit a denied action.
 - If a Principal Group already has `delete` on channels, adding a `device` to that group must be rejected.
 
 MVP recommendation:
 
-- Add the `capability_assignment_rules` table.
-- Seed global default rules for common entity kinds and common capabilities.
+- Add the `action_assignment_rules` table.
+- Seed global default rules for common entity kinds and common actions.
 - Support optional tenant-specific rules.
 - Allow tenant admins to create stricter tenant-specific deny rules.
-- Validate assignment creation, role permission changes, and Principal Group membership changes.
+- Validate Role Assignment creation, Direct Policy creation, Permission Block changes, and Principal Group membership changes.
 - Make deny beat allow.
 - Make absolute global deny impossible to override.
 - Audit every rejected assignment and every override.
@@ -980,10 +985,10 @@ Priority levels: "Must" items are required for general availability and ship acr
 | TEN-5 | Entities, resources, Object Groups, Principal Groups, and roles must be able to reference tenants by `tenant_id`. | Must |
 | TEN-6 | Magistrala domains must map directly to Atom tenants. | Must |
 | TEN-7 | Authorization checks must support tenant objects through `object_kind = "tenant"` and `object_id`. | Must |
-| TEN-8 | Tenant-wide role permission blocks must apply only to objects whose `tenant_id` matches the tenant. | Must |
-| TEN-9 | For MVP, `manage` on a tenant must grant administration over normal tenant-scoped objects, while sensitive operations use explicit capabilities. | Must |
-| TEN-10 | Tenant-owned role permission blocks must not apply to other tenants or global platform objects where `tenant_id = null`. | Must |
-| TEN-11 | Device and workload runtime access should normally use roles, assignments, and trusted internal policy-backed direct capability grants rather than broad tenant administration access. | Should |
+| TEN-8 | Tenant-wide Permission Blocks must apply only to objects whose `tenant_id` matches the tenant. | Must |
+| TEN-9 | For MVP, `manage` on a tenant must grant administration over normal tenant-scoped objects, while sensitive operations use explicit actions. | Must |
+| TEN-10 | Tenant-owned Permission Blocks must not apply to other tenants or global platform objects where `tenant_id = null`. | Must |
+| TEN-11 | Device and workload runtime access should normally use roles, role assignments, and trusted Direct Policies that reference Permission Blocks rather than broad tenant administration access. | Should |
 | TEN-12 | Atom must create a tenant-scoped `tenant-admin` role for every new tenant. | Must |
 | TEN-13 | The tenant creator must receive the generated `tenant-admin` role. | Must |
 | TEN-14 | Authorization checks for inactive, frozen, or deleted tenants must be denied with a reason that includes tenant state. | Must |
@@ -998,12 +1003,12 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AZ-2 | The system must support resource checks by `resource_id`. | Must |
 | AZ-3 | The system must support protected object checks by `object_kind` and `object_id`. | Must |
 | AZ-4 | The PDP must load the subject and require it to be active. | Must |
-| AZ-5 | The PDP must resolve the requested capability by action and validate capability applicability for the protected object type. | Must |
+| AZ-5 | The PDP must resolve the requested action and validate action applicability for the protected object type. | Must |
 | AZ-6 | The PDP must evaluate direct entity role assignments. | Must |
 | AZ-7 | The PDP must evaluate Principal Group role assignments inherited through membership. | Must |
-| AZ-8 | The PDP must evaluate role permission blocks and their actions. | Must |
-| AZ-9 | The PDP must batch-load role permission blocks and actions before evaluating assignments. | Must |
-| AZ-10 | The PDP must support role permission boundaries for platform, tenant, object kind, object type, exact object, and Object Group containment. | Must |
+| AZ-8 | The PDP must evaluate Permission Blocks and their actions through both role assignments and Direct Policies. | Must |
+| AZ-9 | The PDP must evaluate one effective-permission shape built from role assignments and Direct Policies. | Must |
+| AZ-10 | The PDP must support Permission Block scopes for platform, tenant, object kind, object type, exact object, and Object Group containment. | Must |
 | AZ-11 | The PDP must support ABAC conditions against top-level fields, attributes, and request context. | Must |
 | AZ-12 | A matching deny must override any allow. | Must |
 | AZ-13 | No matching allow must return denied. | Must |
@@ -1011,7 +1016,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AZ-15 | The system must expose gRPC authorization check APIs for runtime integrations. gRPC is runtime-only for now; management APIs remain HTTP-only. Management APIs may be added to gRPC later if needed. | Should |
 | AZ-16 | Authorization checks must evaluate tenant lifecycle state for tenant-scoped objects. | Must |
 | AZ-17 | Entity subtypes must be represented as `object_kind = entity` with an entity-kind/object-type filter, not as separate protected object kinds. | Must |
-| AZ-18 | Assignments must not have a separate scope; where access applies must come from the assigned role's permission blocks. | Must |
+| AZ-18 | Role Assignments must not have a separate scope; where access applies must come from the assigned role's Permission Blocks. | Must |
 | AZ-19 | Entity subtype permission blocks must use object type values such as `entity:device` and `entity:human`. | Must |
 | AZ-20 | ABAC conditions must support top-level fields such as `entity.kind`, `entity.tenant_id`, `tenant.status`, `object.kind`, and `object.type`. | Must |
 | AZ-21 | ABAC conditions must support JSON attributes such as `entity.attributes.*`, `resource.attributes.*`, `tenant.attributes.*`, and `object.attributes.*`. | Must |
@@ -1022,9 +1027,9 @@ Priority levels: "Must" items are required for general availability and ship acr
 | ID | Requirement | Priority |
 |---|---|---|
 | AM-1 | The system must create, list, read, update, and delete tenant-owned roles. | Must |
-| AM-2 | The system must add, update, and remove role permission blocks and their actions. | Must |
-| AM-3 | The system must create, list, read, and delete capabilities. | Must |
-| AM-4 | Capability, role, and assignment mutation must require manage permission. | Must |
+| AM-2 | The system must create, list, read, update, and delete Permission Blocks and their actions. | Must |
+| AM-3 | The system must create, list, read, and delete actions. | Must |
+| AM-4 | Action, role, and assignment mutation must require manage permission. | Must |
 | AM-5 | The system must create, list, read, and delete role assignments. | Must |
 | AM-6 | The system must create, update, nest, and delete Object Groups. | Must |
 | AM-7 | The system must create and delete Principal Groups and add, list, and remove Principal Group members. | Must |
@@ -1033,17 +1038,17 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AM-10 | Tenant admins must be able to manage role assignments owned by their tenant. | Must |
 | AM-11 | Tenant-owned role assignments must not grant access outside their tenant unless the assigned role is a platform/system role. | Must |
 
-### Capability Assignment Guardrails
+### Action Assignment Guardrails
 
 | ID | Requirement | Priority |
 |---|---|---|
-| GR-1 | The system must support capability applicability rules that define which actions are valid for which object types. | Must |
+| GR-1 | The system must support action applicability rules that define which actions are valid for which object types. | Must |
 | GR-2 | The system must support global guardrail rules with `tenant_id = null`. | Must |
 | GR-3 | The system must support tenant-specific guardrail rules. | Should |
 | GR-4 | The system must support absolute global denies that tenant-specific rules cannot override. | Must |
-| GR-5 | The system must validate trusted internal policy-backed direct capability grants before creating them. | Must |
-| GR-6 | The system must validate role assignments by checking the assigned role's permission blocks and actions. | Must |
-| GR-7 | The system must validate role permission changes against existing role holders. | Must |
+| GR-5 | The system must validate Direct Policies before creating them. | Must |
+| GR-6 | The system must validate role assignments by checking the assigned role's Permission Blocks and actions. | Must |
+| GR-7 | The system must validate Permission Block changes against existing role holders and Direct Policy subjects. | Must |
 | GR-8 | The system must validate Principal Group assignment changes against existing group members. | Must |
 | GR-9 | The system must validate Principal Group membership changes against assignments the new member would inherit. | Must |
 | GR-10 | The system should support `require_override` for assignments that are risky but platform-admin approved. | Should |
@@ -1063,7 +1068,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 | QRY-4 | The system must expose audit logs with useful filters. | Must |
 | QRY-5 | The system should list who holds a role. | Should |
 | QRY-6 | The system should list what access a Principal Group grants. | Should |
-| QRY-7 | The system should list an entity's effective capabilities. | Should |
+| QRY-7 | The system should list an entity's effective actions. | Should |
 | QRY-8 | The system should report orphaned assignments. | Should |
 | QRY-9 | The system should report unprotected resources. | Should |
 | QRY-10 | The system should report expiring credentials. | Should |
@@ -1099,7 +1104,7 @@ Rules:
 | MAG-2 | Magistrala users must map to global `human` entities. | Must |
 | MAG-3 | Magistrala clients must map to `device` or `service` entities scoped to a tenant. | Must |
 | MAG-4 | Magistrala channels must map to `resource` rows with `kind = "channel"`. | Must |
-| MAG-5 | Client-channel publish and subscribe permissions must be expressible as Atom role assignments or trusted internal policy-backed direct capability grants. | Must |
+| MAG-5 | Client-channel publish and subscribe permissions must be expressible as Atom role assignments or trusted Direct Policies. | Must |
 | MAG-6 | Magistrala metadata must be stored under `attributes.magistrala`. | Must |
 | MAG-7 | Magistrala runtime access checks must call Atom instead of maintaining a separate authorization database. | Must |
 
@@ -1119,10 +1124,10 @@ Atom must expose these API categories:
 - Ownerships: entity-to-entity parent/child relations.
 - Resources: protected object CRUD.
 - Roles: role CRUD and permission block management.
-- Capabilities: capability CRUD.
+- Actions: action CRUD.
 - Assignments: role assignment CRUD.
 - Authorization: single check, bulk check, explain.
-- Query endpoints: entity access, resource access, Principal Group access, role holders, effective capabilities.
+- Query endpoints: entity access, resource access, Principal Group access, role holders, effective actions.
 - Audit: audit log listing.
 - Admin hygiene: orphan assignments, unprotected resources, expiring credentials.
 - gRPC: runtime authorization-oriented service interface only for now; management APIs remain HTTP-only unless added later.
@@ -1137,7 +1142,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 6. [POST /authz/check/bulk](./05-bulk-check.md)
 7. [GET /roles/:id/holders](./06-role-holders.md)
 8. [Principal Group access](./07-group-access.md)
-9. [GET /entities/:id/effective-capabilities](./08-effective-capabilities.md)
+9. [GET /entities/:id/effective-actions](./08-effective-actions.md)
 10. [Admin hygiene endpoints](./09-admin-hygiene.md)
 11. [Building Magistrala on Atom](./10-magistrala-on-atom.md)
 12. [Atom access model](./11-access-model-simplification.md)
@@ -1170,7 +1175,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 
 ### Performance
 
-- Authorization checks must avoid per-assignment role permission queries.
+- Authorization checks must avoid per-assignment Permission Block queries.
 - Role permission blocks and actions must be batch-loaded for authorization evaluation.
 - API key authentication must avoid full credential-table scans by using the embedded credential ID.
 - List endpoints must support pagination.
@@ -1179,7 +1184,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 
 - Existing `resource_id` authorization checks must remain supported.
 - New `object_kind` and `object_id` authorization checks must not break the legacy shape.
-- Legacy callers may send `resource_kind = "channel"` over HTTP during migration; new APIs should use object type values such as `resource:channel`. The legacy form must not appear in stored role permission blocks, assignment records, guardrail rules, or audit records.
+- New APIs should use explicit object kind and object type values such as `object_kind = "resource"` and `object_type = "channel"`. No legacy scope or resource-kind form should appear in stored Permission Blocks, assignments, Direct Policies, guardrail rules, or audit records.
 - HTTP and gRPC authorization semantics must match.
 
 ---
@@ -1206,7 +1211,7 @@ Atom is successful when:
 - JWT sessions
 - API keys
 - Resources
-- Capabilities
+- Actions
 - Roles
 - Assignments
 - Single authorization check
@@ -1222,7 +1227,7 @@ Atom is successful when:
 - Bulk check endpoint
 - Role holders endpoint
 - Principal Group access endpoint
-- Effective capabilities endpoint
+- Effective actions endpoint
 - Admin hygiene endpoints
 
 ### Phase 3: Tenant and Magistrala alignment
@@ -1240,14 +1245,14 @@ Atom is successful when:
 - Magistrala integration guide
 - HTTP/OpenAPI and gRPC contract updates
 
-### Phase 4: Capability assignment guardrails
+### Phase 4: Action assignment guardrails
 
-- `capability_assignment_rules` table
+- `action_assignment_rules` table
 - Global default assignment rules
 - Tenant-specific assignment rules
 - Absolute global deny support
 - Validation during assignment creation
-- Validation during role assignment and role permission updates
+- Validation during role assignment and Permission Block updates
 - Validation during Principal Group membership changes
 - Rejected-assignment and override audit logs
 

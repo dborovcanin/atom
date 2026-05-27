@@ -36,7 +36,7 @@ Equivalent REST-style naming, if exposed internally, should use Principal Group 
 |---|---|---|
 | `principalGroupId` | UUID | Principal Group ID |
 | `tenantId` | UUID | Tenant/domain filter |
-| `action` | string | Optional capability/action filter |
+| `action` | string | Optional action filter |
 | `objectType` | string | Optional object type filter such as `entity:device` or `resource:channel` |
 | `limit` | int | Results per page |
 | `offset` | int | Pagination offset |
