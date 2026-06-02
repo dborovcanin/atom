@@ -52,13 +52,17 @@ execute
 manage
 role.manage
 policy.manage
-credential.manage
-audit.read
-tenant.manage
-tenant.create
-signing_key.rotate
+create
+revoke
+rotate
 authz.check
 ```
+
+Action naming is hybrid:
+
+- stored protected objects use generic actions, for example `read` on `audit_log`, `manage` or `revoke` on `credential`, `create` or `manage` on `tenant`, and `rotate` on `signing_key`;
+- scoped access administration keeps explicit actions: `role.manage` manages roles for a Permission Block scope, and `policy.manage` adds/removes assignments for that scope;
+- system authorization checks keep `authz.check`.
 
 Do not create object-specific action names such as:
 
@@ -311,7 +315,7 @@ Listing must:
 - support deny-overrides-allow.
 - apply search/sort/pagination after authorization filtering.
 
-Separate actions such as `policy.manage`, `role.manage`, or `assignment.manage` are only for managing access-control objects themselves, not for listing ordinary domain objects.
+Separate actions such as `policy.manage` and `role.manage` are only for scoped access administration, not for listing ordinary domain objects.
 
 ## Validation Rules
 
@@ -356,4 +360,3 @@ scope_kind
 scope_ref
 overloaded Group
 ```
-

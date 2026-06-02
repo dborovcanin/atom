@@ -67,6 +67,13 @@ export type DataTableProps<TData, TValue> = {
     label?: string;
     options?: string[];
   };
+  filters?: Array<{
+    key: string;
+    label: string;
+    type: "text" | "select";
+    placeholder?: string;
+    options?: Array<{ label: string; value: string }>;
+  }>;
   /** Rendered in the top-right toolbar area (e.g. a Create button). */
   toolbar?: React.ReactNode;
 };
@@ -81,6 +88,7 @@ export function DataTable<TData, TValue>({
   searchPlaceholder = "Search…",
   noResultsMessage = "No results.",
   statusFilter,
+  filters = [],
   toolbar,
 }: DataTableProps<TData, TValue>) {
   const router = useRouter();
@@ -94,7 +102,18 @@ export function DataTable<TData, TValue>({
   const [statusValue, setStatusValue] = useState(
     () => searchParams.get(`${paramKey}.status`) ?? "all",
   );
+  const [filterValues, setFilterValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      filters.map((filter) => [
+        filter.key,
+        searchParams.get(`${paramKey}.${filter.key}`) ?? "",
+      ]),
+    ),
+  );
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>(null);
+  const filterTimeouts = useRef<
+    Record<string, ReturnType<typeof setTimeout> | undefined>
+  >({});
 
   // Keep local search value in sync when the URL param changes externally.
   const urlQ = searchParams.get(`${paramKey}.q`) ?? "";
@@ -105,6 +124,16 @@ export function DataTable<TData, TValue>({
   useEffect(() => {
     setStatusValue(urlStatus);
   }, [urlStatus]);
+  useEffect(() => {
+    setFilterValues(
+      Object.fromEntries(
+        filters.map((filter) => [
+          filter.key,
+          searchParams.get(`${paramKey}.${filter.key}`) ?? "",
+        ]),
+      ),
+    );
+  }, [filters, paramKey, searchParams]);
 
   const pageCount = total > 0 ? Math.ceil(total / limit) : 1;
 
@@ -139,6 +168,31 @@ export function DataTable<TData, TValue>({
         [`${paramKey}.page`]: null,
       }),
     );
+  }
+
+  function commitFilterChange(key: string, value: string) {
+    router.replace(
+      buildUrl({
+        [`${paramKey}.${key}`]: value === "all" ? null : value || null,
+        [`${paramKey}.page`]: null,
+      }),
+    );
+  }
+
+  function handleFilterChange(
+    filter: NonNullable<DataTableProps<TData, TValue>["filters"]>[number],
+    value: string,
+  ) {
+    setFilterValues((current) => ({ ...current, [filter.key]: value }));
+    if (filter.type === "text") {
+      const existing = filterTimeouts.current[filter.key];
+      if (existing) clearTimeout(existing);
+      filterTimeouts.current[filter.key] = setTimeout(() => {
+        commitFilterChange(filter.key, value);
+      }, 400);
+      return;
+    }
+    commitFilterChange(filter.key, value);
   }
 
   const statusOptions = React.useMemo(() => {
@@ -207,6 +261,28 @@ export function DataTable<TData, TValue>({
               value={statusValue}
             />
           ) : null}
+          {filters.map((filter) =>
+            filter.type === "select" ? (
+              <SelectFilter
+                filter={filter}
+                key={filter.key}
+                onChange={(value) => handleFilterChange(filter, value)}
+                value={filterValues[filter.key] || "all"}
+              />
+            ) : (
+              <div className="relative" key={filter.key}>
+                <Input
+                  aria-label={`Filter by ${filter.label}`}
+                  className="h-9 w-full sm:w-48"
+                  onChange={(event) =>
+                    handleFilterChange(filter, event.target.value)
+                  }
+                  placeholder={filter.placeholder ?? filter.label}
+                  value={filterValues[filter.key] ?? ""}
+                />
+              </div>
+            ),
+          )}
         </div>
         <div className="flex items-center gap-2">
           <DataTableViewOptions table={table} />
@@ -396,6 +472,41 @@ function StatusFilterSelect({
           {options.map((option) => (
             <SelectItem key={option} value={option}>
               {capitalize(option)}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+function SelectFilter({
+  filter,
+  onChange,
+  value,
+}: {
+  filter: {
+    key: string;
+    label: string;
+    options?: Array<{ label: string; value: string }>;
+  };
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  return (
+    <Select onValueChange={onChange} value={value || "all"}>
+      <SelectTrigger
+        aria-label={`Filter by ${filter.label}`}
+        className="h-9 w-full sm:w-44"
+      >
+        <SelectValue placeholder={filter.label} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          <SelectItem value="all">All {filter.label}</SelectItem>
+          {(filter.options ?? []).map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
             </SelectItem>
           ))}
         </SelectGroup>

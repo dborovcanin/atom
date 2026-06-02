@@ -3,7 +3,7 @@
 ## Status: Draft
 ## Date: 2026-04-24
 
-This document details query and search endpoints. For the top-level project requirements, see [Atom Product Requirements Document](./PRD.md).
+This document is supporting background for query and search requirements. The source of truth is [Atom Product Requirements Document](./PRD.md), and authorization terminology is defined in [Atom Access Model Simplification](./11-access-model-simplification.md).
 
 ---
 
@@ -34,7 +34,7 @@ These questions apply to all entity kinds equally — humans, devices, services,
 ## Non-goals
 
 1. Real-time streaming or push notifications (webhooks are a future item).
-2. GraphQL or other query languages — these are fixed, purpose-built endpoints.
+2. A general-purpose policy query language — Atom exposes product-specific GraphQL operations instead.
 3. Policy simulation ("what-if" analysis) — deferred to a future iteration.
 
 ---

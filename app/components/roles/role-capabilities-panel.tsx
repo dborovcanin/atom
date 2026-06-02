@@ -4,120 +4,129 @@ import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { graphqlClient } from "@/lib/graphql/client";
 
-const ROLE_CAPABILITIES_QUERY = `
-  query RoleCapabilitiesPanel($roleId: ID!) {
-    roleCapabilities(roleId: $roleId) { id name resourceKind description }
+const ROLE_PERMISSION_BLOCKS_QUERY = `
+  query RolePermissionBlocksPanel($roleId: ID!) {
     role(id: $roleId) {
       permissionBlocks {
         id
-        appliesTo
+        tenantId
+        scopeMode
         objectKind
         objectType
-        tenantId
         objectId
         groupId
-        capabilities { id name resourceKind description }
+        effect
+        actions { id name description }
       }
     }
   }
 `;
 
-type GqlCapability = {
+type Action = {
   id: string;
   name: string;
-  resourceKind: string | null;
-  description: string | null;
+  description?: string | null;
+};
+
+type PermissionBlock = {
+  id: string;
+  tenantId?: string | null;
+  scopeMode: string;
+  objectKind?: string | null;
+  objectType?: string | null;
+  objectId?: string | null;
+  groupId?: string | null;
+  effect: string;
+  actions: Action[];
 };
 
 export function RoleCapabilitiesPanel({ roleId }: { roleId: string }) {
   const { data, isFetching, error } = useQuery({
-    queryKey: ["role-capabilities-panel", roleId],
+    queryKey: ["role-permission-blocks-panel", roleId],
     queryFn: ({ signal }) =>
       graphqlClient<{
-        roleCapabilities: GqlCapability[];
-        role: {
-          permissionBlocks: {
-            id: string;
-            appliesTo: string;
-            objectKind: string | null;
-            objectType: string | null;
-            tenantId: string | null;
-            objectId: string | null;
-            groupId: string | null;
-            capabilities: GqlCapability[];
-          }[];
-        };
+        role: { permissionBlocks: PermissionBlock[] };
       }>({
-        query: ROLE_CAPABILITIES_QUERY,
+        query: ROLE_PERMISSION_BLOCKS_QUERY,
         variables: { roleId },
         signal,
       }),
     staleTime: 30_000,
   });
 
-  const capabilities = data?.roleCapabilities ?? [];
-  const role = data?.role;
-  const permissionBlocks = role?.permissionBlocks ?? [];
+  const permissionBlocks = data?.role.permissionBlocks ?? [];
 
   return (
     <div className="grid gap-3 rounded-lg border bg-background p-3">
-      <div className="text-sm font-medium">Permissions</div>
-      {isFetching && capabilities.length === 0 && !role ? (
+      <div className="text-sm font-medium">Permission blocks</div>
+      {isFetching && permissionBlocks.length === 0 ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : error ? (
         <p className="text-sm text-destructive">{error.message}</p>
-      ) : permissionBlocks.length > 0 ? (
-        <div className="grid gap-2">
-          {permissionBlocks.map((block) => (
-            <div className="grid gap-1 rounded-md border p-2" key={block.id}>
-              <div className="text-xs font-medium text-muted-foreground">
-                {block.appliesTo}
-                {block.objectType ? ` · ${block.objectType}` : ""}
-                {block.objectKind && !block.objectType
-                  ? ` · ${block.objectKind}`
-                  : ""}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {block.capabilities.map((cap) => (
-                  <Badge
-                    key={cap.id}
-                    title={cap.description ?? undefined}
-                    variant="secondary"
-                  >
-                    {cap.name}
-                    {cap.resourceKind ? (
-                      <span className="ml-1 text-muted-foreground">
-                        :{cap.resourceKind}
-                      </span>
-                    ) : null}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : capabilities.length === 0 ? (
+      ) : permissionBlocks.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No permissions assigned to this role.
+          No permission blocks are attached to this role.
         </p>
       ) : (
-        <div className="flex flex-wrap gap-1.5">
-          {capabilities.map((cap) => (
-            <Badge
-              key={cap.id}
-              variant="secondary"
-              title={cap.description ?? undefined}
-            >
-              {cap.name}
-              {cap.resourceKind ? (
-                <span className="ml-1 text-muted-foreground">
-                  :{cap.resourceKind}
-                </span>
-              ) : null}
-            </Badge>
+        <div className="grid gap-2">
+          {permissionBlocks.map((block) => (
+            <div className="grid gap-2 rounded-md border p-2" key={block.id}>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={block.effect === "deny" ? "destructive" : "secondary"}>
+                  {block.effect}
+                </Badge>
+                <span className="text-sm font-medium">{scopeLabel(block)}</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {block.actions.length === 0 ? (
+                  <span className="text-sm text-muted-foreground">No actions</span>
+                ) : (
+                  block.actions.map((action) => (
+                    <Badge
+                      key={action.id}
+                      title={action.description ?? undefined}
+                      variant="outline"
+                    >
+                      {action.name}
+                    </Badge>
+                  ))
+                )}
+              </div>
+              <div className="break-all font-mono text-xs text-muted-foreground">
+                {block.id}
+              </div>
+            </div>
           ))}
         </div>
       )}
     </div>
   );
 }
+
+function scopeLabel(block: PermissionBlock) {
+  switch (block.scopeMode) {
+    case "platform":
+      return "Platform";
+    case "tenant":
+      return block.tenantId ? `Tenant ${block.tenantId}` : "Tenant";
+    case "object_kind":
+      return `All ${block.objectKind ?? "objects"}`;
+    case "object_type":
+      return `All ${block.objectKind ?? "objects"}:${block.objectType ?? "*"}`;
+    case "object":
+      return `${block.objectKind ?? "object"} ${block.objectId ?? ""}`.trim();
+    case "group":
+      return `Object group ${block.groupId ?? ""}`.trim();
+    case "group_direct_objects":
+      return `Direct ${block.objectKind ?? "objects"} in group ${block.groupId ?? ""}`.trim();
+    case "group_descendant_objects":
+      return `Descendant ${block.objectKind ?? "objects"} in group ${block.groupId ?? ""}`.trim();
+    case "group_child_groups":
+      return `Direct child groups of ${block.groupId ?? ""}`.trim();
+    case "group_descendant_groups":
+      return `Descendant groups of ${block.groupId ?? ""}`.trim();
+    default:
+      return block.scopeMode;
+  }
+}
+

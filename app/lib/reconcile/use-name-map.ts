@@ -6,7 +6,7 @@ const ENTITY_Q = `query ResolveEntity($id: ID!) { entity(id: $id) { name } }`;
 const PROFILE_Q = `query ResolveProfile($id: ID!) { profile(id: $id) { displayName } }`;
 const GROUP_Q = `query ResolveGroup($id: ID!) { group(id: $id) { name } }`;
 const ROLE_Q = `query ResolveRole($id: ID!) { role(id: $id) { name } }`;
-const CAPABILITY_Q = `query ResolveCapability($id: ID!) { capability(id: $id) { name } }`;
+const ACTION_Q = `query ResolveAction($id: ID!) { action(id: $id) { name } }`;
 
 export type NameSpec = {
   tenantIds?: string[];
@@ -14,7 +14,7 @@ export type NameSpec = {
   profileIds?: string[];
   groupIds?: string[];
   roleIds?: string[];
-  capabilityIds?: string[];
+  actionIds?: string[];
 };
 
 function uniq(ids?: string[]): string[] {
@@ -67,10 +67,10 @@ async function fetchNames(spec: NameSpec): Promise<Map<string, string>> {
     ROLE_Q,
     (d) => d.role?.name,
   );
-  add<{ capability: { name: string } | null }>(
-    uniq(spec.capabilityIds),
-    CAPABILITY_Q,
-    (d) => d.capability?.name,
+  add<{ action: { name: string } | null }>(
+    uniq(spec.actionIds),
+    ACTION_Q,
+    (d) => d.action?.name,
   );
 
   await Promise.all(tasks);
@@ -85,7 +85,7 @@ export function useNameMap(spec: NameSpec): Map<string, string> {
   const profileIds = uniq(spec.profileIds);
   const groupIds = uniq(spec.groupIds);
   const roleIds = uniq(spec.roleIds);
-  const capabilityIds = uniq(spec.capabilityIds);
+  const actionIds = uniq(spec.actionIds);
 
   const total =
     tenantIds.length +
@@ -93,7 +93,7 @@ export function useNameMap(spec: NameSpec): Map<string, string> {
     profileIds.length +
     groupIds.length +
     roleIds.length +
-    capabilityIds.length;
+    actionIds.length;
 
   const { data } = useQuery({
     queryKey: [
@@ -103,7 +103,7 @@ export function useNameMap(spec: NameSpec): Map<string, string> {
       profileIds.slice().sort(),
       groupIds.slice().sort(),
       roleIds.slice().sort(),
-      capabilityIds.slice().sort(),
+      actionIds.slice().sort(),
     ],
     queryFn: () => fetchNames(spec),
     enabled: total > 0,
@@ -123,7 +123,7 @@ export function extractIds(
   const profileIds: string[] = [];
   const groupIds: string[] = [];
   const roleIds: string[] = [];
-  const capabilityIds: string[] = [];
+  const actionIds: string[] = [];
 
   for (const row of rows) {
     const str = (v: unknown) => (v && typeof v === "string" ? v : undefined);
@@ -140,20 +140,13 @@ export function extractIds(
 
     if (resourceKey === "policies") {
       const subjectId = str(row.subjectId);
-      const grantId = str(row.grantId);
-      const scopeRef = str(row.scopeRef);
 
       if (subjectId) {
         if (row.subjectKind === "entity") entityIds.push(subjectId);
         else if (row.subjectKind === "group") groupIds.push(subjectId);
       }
-      if (grantId) {
-        if (row.grantKind === "role") roleIds.push(grantId);
-        else if (row.grantKind === "capability") capabilityIds.push(grantId);
-      }
-      if (scopeRef && row.scopeKind === "tenant") tenantIds.push(scopeRef);
     }
   }
 
-  return { tenantIds, entityIds, profileIds, groupIds, roleIds, capabilityIds };
+  return { tenantIds, entityIds, profileIds, groupIds, roleIds, actionIds };
 }

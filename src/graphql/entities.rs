@@ -2,16 +2,15 @@ use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
     auth::Scope,
-    authz::engine,
+    authz::{engine, repo as authz_repo},
     identity::repo,
-    models::{entity as entity_model, entity::ListEntities, policy::AuthzRequest},
+    models::{access::AuthorizedObjectIdsQuery, entity as entity_model, policy::AuthzRequest},
     state::AppState,
 };
 
 use super::{
     auth::{
-        gql_error, require_any_capability, require_auth, require_list_access, require_read_access,
-        scope_for_tenant,
+        gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
     },
     types::{
         parse_id, parse_optional_entity_kind, parse_optional_entity_status, parse_optional_id,
@@ -83,17 +82,19 @@ impl EntityQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         let parent_group_id = parse_optional_id(parent_group_id, "parentGroupId")?;
-        if parent_group_id.is_none() {
-            require_list_access(&state.pool, auth.entity_id, tenant_id).await?;
-        }
-        let list = repo::list_entities(
+        let parsed_kind = parse_optional_entity_kind(kind);
+        let parsed_status = parse_optional_entity_status(status);
+        let authorized = authz_repo::authorized_object_ids(
             &state.pool,
-            ListEntities {
-                q,
-                kind: parse_optional_entity_kind(kind),
-                profile_id: parse_optional_id(profile_id, "profileId")?,
+            AuthorizedObjectIdsQuery {
+                subject_id: auth.entity_id,
+                action: "read".to_string(),
+                object_kind: "entity".to_string(),
+                object_type: parsed_kind.as_ref().map(entity_object_type),
                 tenant_id,
-                status: parse_optional_entity_status(status),
+                q,
+                profile_id: parse_optional_id(profile_id, "profileId")?,
+                entity_status: parsed_status,
                 parent_group_id,
                 include_descendants: include_descendants.unwrap_or(false),
                 limit: limit.map(i64::from).unwrap_or(20),
@@ -102,39 +103,26 @@ impl EntityQuery {
         )
         .await
         .map_err(gql_error)?;
-        if parent_group_id.is_some() {
-            let mut authorized = Vec::new();
-            for item in list.items {
-                let allowed = engine::evaluate(
-                    &state.pool,
-                    &AuthzRequest {
-                        subject_id: auth.entity_id,
-                        action: "read".to_string(),
-                        resource_id: None,
-                        object_kind: Some("entity".to_string()),
-                        object_id: Some(item.id),
-                        context: serde_json::Value::Null,
-                    },
-                )
-                .await
-                .map_err(gql_error)?
-                .allowed;
-                if allowed {
-                    authorized.push(Entity::from(item));
-                }
-            }
-            let total = authorized.len() as i64;
-            return Ok(EntityList {
-                items: authorized,
-                total,
-            });
-        }
+        let items = repo::list_entities_by_ids(&state.pool, &authorized.ids)
+            .await
+            .map_err(gql_error)?;
 
         Ok(EntityList {
-            items: list.items.into_iter().map(Entity::from).collect(),
-            total: list.total,
+            items: items.into_iter().map(Entity::from).collect(),
+            total: authorized.total,
         })
     }
+}
+
+fn entity_object_type(kind: &crate::models::enums::EntityKind) -> String {
+    match kind {
+        crate::models::enums::EntityKind::Human => "entity:human",
+        crate::models::enums::EntityKind::Device => "entity:device",
+        crate::models::enums::EntityKind::Service => "entity:service",
+        crate::models::enums::EntityKind::Workload => "entity:workload",
+        crate::models::enums::EntityKind::Application => "entity:application",
+    }
+    .to_string()
 }
 
 #[derive(Default)]

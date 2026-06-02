@@ -8,8 +8,6 @@ pub struct Role {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
-    pub scope_kind: String,
-    pub scope_ref: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -19,8 +17,6 @@ pub struct CreateRole {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
-    pub scope_kind: Option<String>,
-    pub scope_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +36,6 @@ pub struct UpdateRole {
 #[derive(Debug, Deserialize)]
 pub struct ListRoles {
     pub tenant_id: Option<Uuid>,
-    pub scope_kind: Option<String>,
-    pub scope_ref: Option<String>,
     pub derived_kind: Option<String>,
     pub q: Option<String>,
     #[serde(default = "default_limit")]

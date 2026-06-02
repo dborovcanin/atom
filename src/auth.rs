@@ -368,7 +368,7 @@ pub async fn has_capability_in_scope(
     let sql = format!(
         r#"SELECT EXISTS (
             SELECT 1
-            FROM policy_bindings pb
+            FROM effective_access_edges() pb
             JOIN entities actor ON actor.id = $1 AND actor.status = 'active'
             LEFT JOIN tenants actor_tenant ON actor_tenant.id = actor.tenant_id
             WHERE (
@@ -382,12 +382,12 @@ pub async fn has_capability_in_scope(
             AND {scope_clause}
             AND (
                 (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                    SELECT id FROM capabilities WHERE name = $2 AND resource_kind IS NULL
+                    SELECT id FROM actions WHERE name = $2
                 ))
                 OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                    SELECT rc.role_id FROM role_capabilities rc
-                    JOIN capabilities c ON c.id = rc.capability_id
-                    WHERE c.name = $2 AND c.resource_kind IS NULL
+                    SELECT rc.role_id FROM effective_role_actions() rc
+                    JOIN actions c ON c.id = rc.capability_id
+                    WHERE c.name = $2
                 ))
             )
         )"#
@@ -437,12 +437,7 @@ pub async fn require_list_access(
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let scope = scope_for_tenant(tenant_id);
-    require_any_capability(
-        pool,
-        entity_id,
-        &[("list", scope), ("read", scope), ("manage", scope)],
-    )
-    .await
+    require_any_capability(pool, entity_id, &[("read", scope), ("manage", scope)]).await
 }
 
 pub async fn require_read_access(
@@ -471,12 +466,7 @@ pub async fn require_role_read(
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let scope = scope_for_tenant(tenant_id);
-    require_any_capability(
-        pool,
-        entity_id,
-        &[("role.manage", scope), ("read", scope), ("list", scope)],
-    )
-    .await
+    require_any_capability(pool, entity_id, &[("role.manage", scope), ("read", scope)]).await
 }
 
 pub async fn require_policy_read(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
@@ -486,7 +476,6 @@ pub async fn require_policy_read(pool: &PgPool, entity_id: Uuid) -> Result<(), A
         &[
             ("policy.manage", Scope::Platform),
             ("read", Scope::Platform),
-            ("list", Scope::Platform),
             ("manage", Scope::Platform),
         ],
     )

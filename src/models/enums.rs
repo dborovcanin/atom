@@ -97,6 +97,7 @@ pub enum ObjectKind {
     Policy,
     Credential,
     AuditLog,
+    SigningKey,
 }
 
 impl ObjectKind {
@@ -112,6 +113,7 @@ impl ObjectKind {
             ObjectKind::Policy => "policy",
             ObjectKind::Credential => "credential",
             ObjectKind::AuditLog => "audit_log",
+            ObjectKind::SigningKey => "signing_key",
         }
     }
 }

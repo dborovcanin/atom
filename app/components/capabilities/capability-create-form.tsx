@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -25,120 +26,104 @@ import {
 } from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
 
-// ─── GraphQL ─────────────────────────────────────────────────────────────────
+const CAPABILITIES_QUERY = `
+  query ActionApplicabilityFormActions {
+    actions(limit: 500, offset: 0) { items { id name description } }
+  }
+`;
 
 const CREATE_CAPABILITY_MUTATION = `
-  mutation CreateCapability($input: CreateCapabilityInput!) {
-    createCapability(input: $input) { id name resourceKind description createdAt updatedAt }
+  mutation CreateAction($input: CreateActionInput!) {
+    createAction(input: $input) {
+      id
+      name
+      description
+      createdAt
+      updatedAt
+    }
   }
 `;
 
-const UPDATE_CAPABILITY_MUTATION = `
-  mutation UpdateCapability($id: ID!, $input: UpdateCapabilityInput!) {
-    updateCapability(id: $id, input: $input) { id name resourceKind description createdAt updatedAt }
+const ADD_CAPABILITY_APPLICABILITY_MUTATION = `
+  mutation AddActionApplicability($input: AddActionApplicabilityInput!) {
+    addActionApplicability(input: $input) {
+      id
+      actionId
+      actionName
+      objectKind
+      objectType
+      createdAt
+    }
   }
 `;
 
-const RESOURCE_KINDS_QUERY = `
-  query CapabilityFormResourceKinds {
-    resources(limit: 200, offset: 0) { items { kind } }
-  }
-`;
+const OBJECT_KINDS = [
+  "entity",
+  "resource",
+  "group",
+  "tenant",
+  "role",
+  "policy",
+  "credential",
+  "audit_log",
+] as const;
 
-const KIND_NONE = "__none__";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type CapabilityFormInitialValues = {
+export type CapabilityApplicabilityFormInitialValues = {
   id: string;
-  name: string;
-  resourceKind: string;
-  description: string;
+  capabilityId: string;
+  capabilityName: string;
+  objectKind: string;
+  objectType: string;
 };
 
-// ─── Schema ──────────────────────────────────────────────────────────────────
-
-const schema = z.object({
-  name: z.string().trim().min(1, "Name is required."),
-  resourceKind: z.string().trim(),
+const actionSchema = z.object({
+  name: z.string().trim().min(1, "name is required."),
   description: z.string().trim(),
 });
 
-type FormValues = z.infer<typeof schema>;
+const applicabilitySchema = z.object({
+  capabilityId: z.string().min(1, "action_id is required."),
+  objectKind: z.string().min(1, "object_kind is required."),
+  objectType: z.string().trim(),
+});
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+type CapabilityActionValues = z.infer<typeof actionSchema>;
+type CapabilityApplicabilityValues = z.infer<typeof applicabilitySchema>;
 
-export function CapabilityCreateForm({
-  capability,
+type CapabilityOption = {
+  id: string;
+  name: string;
+  description?: string | null;
+};
+
+export function CapabilityActionCreateForm({
   onCancel,
   onSaved,
 }: {
-  capability?: CapabilityFormInitialValues;
   onCancel: () => void;
   onSaved: () => void;
 }) {
-  const isEdit = Boolean(capability);
-
-  const resourceKindsQuery = useQuery({
-    queryKey: ["capability-form-resource-kinds"],
-    queryFn: ({ signal }) =>
-      graphqlClient<{ resources: { items: { kind: string }[] } }>({
-        query: RESOURCE_KINDS_QUERY,
-        signal,
-      }),
-    staleTime: 60_000,
-  });
-
-  const fetchedKinds = [
-    ...new Set(
-      (resourceKindsQuery.data?.resources.items ?? [])
-        .map((r) => r.kind)
-        .filter(Boolean),
-    ),
-  ].sort();
-
-  // In edit mode, ensure the saved value appears even if no matching resource exists.
-  const currentKind = capability?.resourceKind ?? "";
-  const knownKinds =
-    currentKind && !fetchedKinds.includes(currentKind)
-      ? [...fetchedKinds, currentKind].sort()
-      : fetchedKinds;
-
-  const form = useForm<FormValues>({
-    resolver: zodResolver(schema),
+  const form = useForm<CapabilityActionValues>({
+    resolver: zodResolver(actionSchema),
     defaultValues: {
-      name: capability?.name ?? "",
-      resourceKind: capability?.resourceKind ?? "",
-      description: capability?.description ?? "",
+      name: "",
+      description: "",
     },
   });
 
   const save = useMutation({
-    mutationFn: (values: FormValues) =>
-      isEdit
-        ? graphqlClient({
-            query: UPDATE_CAPABILITY_MUTATION,
-            variables: {
-              id: capability?.id,
-              input: {
-                name: values.name,
-                resourceKind: values.resourceKind || undefined,
-                description: values.description || undefined,
-              },
-            },
-          })
-        : graphqlClient({
-            query: CREATE_CAPABILITY_MUTATION,
-            variables: {
-              input: {
-                name: values.name,
-                resourceKind: values.resourceKind || undefined,
-                description: values.description || undefined,
-              },
-            },
-          }),
+    mutationFn: (values: CapabilityActionValues) =>
+      graphqlClient({
+        query: CREATE_CAPABILITY_MUTATION,
+        variables: {
+          input: {
+            name: values.name,
+            description: values.description || null,
+          },
+        },
+      }),
     onSuccess: () => {
-      toast.success(isEdit ? "Capability updated" : "Capability created");
+      toast.success("Action created");
       onSaved();
     },
     onError: (err) => toast.error(err.message),
@@ -148,41 +133,154 @@ export function CapabilityCreateForm({
     <Form {...form}>
       <form
         className="grid gap-4"
-        onSubmit={form.handleSubmit((v) => save.mutate(v))}
+        onSubmit={form.handleSubmit((values) => save.mutate(values))}
       >
         <FormField
           control={form.control}
           name="name"
           render={({ field }) => (
             <FormItem>
-              <RequiredFormLabel required>Name</RequiredFormLabel>
+              <RequiredFormLabel required>name</RequiredFormLabel>
               <FormControl>
                 <Input placeholder="e.g. publish" {...field} />
+              </FormControl>
+              <FormDescription>
+                One unique action name stored in `actions.name`.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="description"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>description</FormLabel>
+              <FormControl>
+                <Input placeholder="e.g. Publish messages to channels" {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
           )}
         />
+
+        <div className="flex justify-end gap-2">
+          <Button onClick={onCancel} type="button" variant="outline">
+            Cancel
+          </Button>
+          <Button disabled={save.isPending} type="submit">
+            Create action
+          </Button>
+        </div>
+      </form>
+    </Form>
+  );
+}
+
+export function CapabilityApplicabilityCreateForm({
+  capability,
+  onCancel,
+  onSaved,
+}: {
+  capability?: CapabilityApplicabilityFormInitialValues;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const capabilitiesQuery = useQuery({
+    queryKey: ["capability-applicability-form-capabilities"],
+    queryFn: ({ signal }) =>
+      graphqlClient<{ actions: { items: CapabilityOption[] } }>({
+        query: CAPABILITIES_QUERY,
+        signal,
+      }),
+    staleTime: 60_000,
+  });
+
+  const form = useForm<CapabilityApplicabilityValues>({
+    resolver: zodResolver(applicabilitySchema),
+    defaultValues: {
+      capabilityId: capability?.capabilityId ?? "",
+      objectKind: capability?.objectKind ?? "",
+      objectType: capability?.objectType ?? "",
+    },
+  });
+
+  const save = useMutation({
+    mutationFn: (values: CapabilityApplicabilityValues) =>
+      graphqlClient({
+        query: ADD_CAPABILITY_APPLICABILITY_MUTATION,
+        variables: {
+          input: {
+            actionId: values.capabilityId,
+            objectKind: values.objectKind,
+            objectType: values.objectType || null,
+          },
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Action applicability row saved");
+      onSaved();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const capabilities = capabilitiesQuery.data?.actions.items ?? [];
+
+  return (
+    <Form {...form}>
+      <form
+        className="grid gap-4"
+        onSubmit={form.handleSubmit((values) => save.mutate(values))}
+      >
         <FormField
           control={form.control}
-          name="resourceKind"
+          name="capabilityId"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Resource kind</FormLabel>
+              <RequiredFormLabel required>action_id</RequiredFormLabel>
               <Select
-                value={field.value || KIND_NONE}
-                onValueChange={(v) => field.onChange(v === KIND_NONE ? "" : v)}
+                disabled={capabilitiesQuery.isFetching}
+                onValueChange={field.onChange}
+                value={field.value || undefined}
               >
                 <FormControl>
                   <SelectTrigger className="w-full">
-                    <SelectValue placeholder="— applies to all resources —" />
+                    <SelectValue placeholder="Select action" />
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent>
-                  <SelectItem value={KIND_NONE}>
-                    — applies to all resources —
-                  </SelectItem>
-                  {knownKinds.map((kind) => (
+                  {capabilities.map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {item.name} ({item.id})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <FormDescription>
+                References `actions.id`. Create the action first if it
+                does not exist yet.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="objectKind"
+          render={({ field }) => (
+            <FormItem>
+              <RequiredFormLabel required>object_kind</RequiredFormLabel>
+              <Select onValueChange={field.onChange} value={field.value || undefined}>
+                <FormControl>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select object_kind" />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  {OBJECT_KINDS.map((kind) => (
                     <SelectItem key={kind} value={kind}>
                       {kind}
                     </SelectItem>
@@ -193,28 +291,31 @@ export function CapabilityCreateForm({
             </FormItem>
           )}
         />
+
         <FormField
           control={form.control}
-          name="description"
+          name="objectType"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Description</FormLabel>
+              <FormLabel>object_type</FormLabel>
               <FormControl>
-                <Input
-                  placeholder="e.g. Publish messages to a channel"
-                  {...field}
-                />
+                <Input placeholder="NULL or e.g. resource:channel" {...field} />
               </FormControl>
+              <FormDescription>
+                Leave empty to store `NULL`. Use namespaced values such as
+                `entity:device` or `resource:channel`.
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}
         />
+
         <div className="flex justify-end gap-2">
           <Button onClick={onCancel} type="button" variant="outline">
             Cancel
           </Button>
           <Button disabled={save.isPending} type="submit">
-            {isEdit ? "Save changes" : "Create capability"}
+            Create row
           </Button>
         </div>
       </form>

@@ -26,16 +26,26 @@ async fn migrations_are_idempotent() {
 
 #[tokio::test]
 #[ignore]
-async fn policy_bindings_has_tenant_id_column() {
+async fn final_access_tables_have_tenant_boundaries() {
     let p = pool().await;
-    let row = sqlx::query(
-        "SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'policy_bindings' AND column_name = 'tenant_id'",
-    )
-    .fetch_optional(&p)
-    .await
-    .expect("query column");
-    assert!(row.is_some(), "policy_bindings.tenant_id missing");
+    for table in [
+        "permission_blocks",
+        "roles",
+        "role_assignments",
+        "direct_policies",
+        "principal_groups",
+        "object_groups",
+    ] {
+        let row = sqlx::query(
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_name = $1 AND column_name = 'tenant_id'",
+        )
+        .bind(table)
+        .fetch_optional(&p)
+        .await
+        .expect("query column");
+        assert!(row.is_some(), "{table}.tenant_id missing");
+    }
 }
 
 #[tokio::test]
@@ -117,39 +127,36 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
 
 #[tokio::test]
 #[ignore]
-async fn capability_assignment_rules_table_exists_with_object_type() {
+async fn action_assignment_rules_table_exists_with_object_type() {
     let p = pool().await;
 
     let row = sqlx::query(
         "SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'capability_assignment_rules' AND column_name = 'object_type'",
+         WHERE table_name = 'action_assignment_rules' AND column_name = 'object_type'",
     )
     .fetch_optional(&p)
     .await
     .expect("query column");
-    assert!(
-        row.is_some(),
-        "capability_assignment_rules.object_type missing"
-    );
+    assert!(row.is_some(), "action_assignment_rules.object_type missing");
 
     // The PRD-incorrect column 'resource_kind' should NOT exist.
     let bad = sqlx::query(
         "SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'capability_assignment_rules' AND column_name = 'resource_kind'",
+         WHERE table_name = 'action_assignment_rules' AND column_name = 'resource_kind'",
     )
     .fetch_optional(&p)
     .await
     .expect("query column");
     assert!(
         bad.is_none(),
-        "capability_assignment_rules must not have a resource_kind column"
+        "action_assignment_rules must not have a resource_kind column"
     );
 
     // Insert and read back a default rule.
     let id = uuid::Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO capability_assignment_rules
-           (id, entity_kind, capability_name, object_kind, object_type, decision, is_absolute)
+        "INSERT INTO action_assignment_rules
+           (id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
          VALUES ($1, 'device', 'publish', 'resource', 'resource:channel', 'allow', true)",
     )
     .bind(id)
@@ -158,14 +165,14 @@ async fn capability_assignment_rules_table_exists_with_object_type() {
     .expect("insert rule");
 
     let decision: String =
-        sqlx::query_scalar("SELECT decision FROM capability_assignment_rules WHERE id = $1")
+        sqlx::query_scalar("SELECT decision FROM action_assignment_rules WHERE id = $1")
             .bind(id)
             .fetch_one(&p)
             .await
             .expect("read decision");
     assert_eq!(decision, "allow");
 
-    let _ = sqlx::query("DELETE FROM capability_assignment_rules WHERE id = $1")
+    let _ = sqlx::query("DELETE FROM action_assignment_rules WHERE id = $1")
         .bind(id)
         .execute(&p)
         .await;
@@ -176,8 +183,11 @@ async fn capability_assignment_rules_table_exists_with_object_type() {
 async fn admin_seed_uses_platform_scope() {
     let p = pool().await;
     let scope: String = sqlx::query_scalar(
-        "SELECT scope_kind::text FROM policy_bindings
-         WHERE subject_id = $1 AND grant_id = $2",
+        r#"SELECT pb.scope_mode
+           FROM role_assignments ra
+           JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           WHERE ra.subject_id = $1 AND ra.role_id = $2"#,
     )
     .bind(admin_id())
     .bind(admin_role_id())
@@ -192,7 +202,7 @@ async fn admin_seed_uses_platform_scope() {
 
 #[tokio::test]
 #[ignore]
-async fn all_canonical_capabilities_are_seeded() {
+async fn all_canonical_actions_are_seeded() {
     let p = pool().await;
     let expected = [
         "read",
@@ -202,83 +212,144 @@ async fn all_canonical_capabilities_are_seeded() {
         "subscribe",
         "execute",
         "manage",
-        "list",
-        "credential.manage",
-        "credential.revoke",
-        "signing_key.rotate",
-        "audit.read",
+        "create",
+        "revoke",
+        "rotate",
         "policy.manage",
         "role.manage",
-        "tenant.manage",
+        "authz.check",
     ];
     for name in expected {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capabilities WHERE name = $1")
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM actions WHERE name = $1")
             .bind(name)
             .fetch_one(&p)
             .await
             .expect("query");
-        assert!(count >= 1, "capability {name} not seeded");
+        assert!(count >= 1, "action {name} not seeded");
     }
 }
 
 #[tokio::test]
 #[ignore]
-async fn check_constraint_rejects_invalid_scope_kind() {
+async fn check_constraint_rejects_invalid_scope_mode() {
     let p = pool().await;
-    // Use an arbitrary entity/cap; the row must fail the CHECK before any FK
-    // is consulted. Bind valid uuids so we hit only the CHECK violation.
-    let cap_id: uuid::Uuid =
-        sqlx::query_scalar("SELECT id FROM capabilities WHERE name = 'manage' LIMIT 1")
-            .fetch_one(&p)
-            .await
-            .expect("manage cap");
 
     let result = sqlx::query(
-        "INSERT INTO policy_bindings
-           (id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect)
-         VALUES ($1, 'entity', $2, 'capability', $3, 'all', NULL, 'allow')",
+        "INSERT INTO permission_blocks (scope_mode, effect)
+         VALUES ('all', 'allow')",
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(admin_id())
-    .bind(cap_id)
     .execute(&p)
     .await;
 
     assert!(
         result.is_err(),
-        "scope_kind='all' must be rejected by the canonical scope CHECK"
+        "scope_mode='all' must be rejected by the canonical scope CHECK"
     );
 }
 
 #[tokio::test]
 #[ignore]
-async fn check_constraint_accepts_all_new_scope_kinds() {
+async fn check_constraint_accepts_all_new_scope_modes() {
     let p = pool().await;
-    let cap_id: uuid::Uuid =
-        sqlx::query_scalar("SELECT id FROM capabilities WHERE name = 'manage' LIMIT 1")
-            .fetch_one(&p)
-            .await
-            .expect("manage cap");
-
-    for kind in ["platform", "tenant", "object_kind", "object_type", "object"] {
-        let id = uuid::Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO policy_bindings
-               (id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect)
-             VALUES ($1, 'entity', $2, 'capability', $3, $4, NULL, 'allow')",
-        )
-        .bind(id)
-        .bind(admin_id())
-        .bind(cap_id)
-        .bind(kind)
+    let tenant_id = uuid::Uuid::new_v4();
+    let group_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+        .bind(tenant_id)
+        .bind(format!("m1-scope-{tenant_id}"))
         .execute(&p)
         .await
-        .unwrap_or_else(|e| panic!("scope_kind={kind} should be accepted: {e}"));
+        .expect("insert tenant");
+    sqlx::query(
+        "INSERT INTO object_groups (id, name, tenant_id)
+         VALUES ($1, 'm1-scope-group', $2)",
+    )
+    .bind(group_id)
+    .bind(tenant_id)
+    .execute(&p)
+    .await
+    .expect("insert object group");
 
-        // Clean up so the test is repeatable.
-        let _ = sqlx::query("DELETE FROM policy_bindings WHERE id = $1")
-            .bind(id)
-            .execute(&p)
-            .await;
+    let inserts = [
+        ("platform", None, None, None, None, None),
+        ("tenant", Some(tenant_id), None, None, None, None),
+        (
+            "object_kind",
+            Some(tenant_id),
+            Some("resource"),
+            None,
+            None,
+            None,
+        ),
+        (
+            "object_type",
+            Some(tenant_id),
+            Some("resource"),
+            Some("resource:channel"),
+            None,
+            None,
+        ),
+        (
+            "object",
+            Some(tenant_id),
+            Some("resource"),
+            None,
+            Some(uuid::Uuid::new_v4()),
+            None,
+        ),
+        ("group", Some(tenant_id), None, None, None, Some(group_id)),
+        (
+            "group_direct_objects",
+            Some(tenant_id),
+            Some("resource"),
+            Some("resource:channel"),
+            None,
+            Some(group_id),
+        ),
+        (
+            "group_descendant_objects",
+            Some(tenant_id),
+            Some("resource"),
+            Some("resource:channel"),
+            None,
+            Some(group_id),
+        ),
+        (
+            "group_child_groups",
+            Some(tenant_id),
+            None,
+            None,
+            None,
+            Some(group_id),
+        ),
+        (
+            "group_descendant_groups",
+            Some(tenant_id),
+            None,
+            None,
+            None,
+            Some(group_id),
+        ),
+    ];
+
+    for (mode, tenant, object_kind, object_type, object_id, group) in inserts {
+        sqlx::query(
+            "INSERT INTO permission_blocks
+               (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect)
+             VALUES ($1, $2, $3, $4, $5, $6, 'allow')",
+        )
+        .bind(mode)
+        .bind(tenant)
+        .bind(object_kind)
+        .bind(object_type)
+        .bind(object_id)
+        .bind(group)
+        .execute(&p)
+        .await
+        .unwrap_or_else(|e| panic!("scope_mode={mode} should be accepted: {e}"));
     }
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .execute(&p)
+        .await;
 }

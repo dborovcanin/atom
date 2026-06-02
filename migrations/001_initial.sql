@@ -242,12 +242,10 @@ CREATE TABLE signing_keys (
 
 CREATE INDEX idx_signing_keys_status ON signing_keys(status);
 
-CREATE TABLE groups (
+CREATE TABLE principal_groups (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT        NOT NULL,
     tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
-    group_type  TEXT        NOT NULL DEFAULT 'object'
-                            CHECK (group_type IN ('object', 'principal')),
     description TEXT,
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes  JSONB       NOT NULL DEFAULT '{}',
@@ -255,24 +253,23 @@ CREATE TABLE groups (
     updated_at  TIMESTAMPTZ
 );
 
-CREATE INDEX idx_groups_tenant ON groups(tenant_id);
-CREATE INDEX idx_groups_type ON groups(group_type);
-CREATE INDEX idx_groups_status ON groups(status);
-CREATE INDEX idx_groups_attrs ON groups USING GIN(attributes);
-CREATE UNIQUE INDEX idx_groups_name_tenant ON groups(name, tenant_id, group_type);
+CREATE INDEX idx_principal_groups_tenant ON principal_groups(tenant_id);
+CREATE INDEX idx_principal_groups_status ON principal_groups(status);
+CREATE INDEX idx_principal_groups_attrs ON principal_groups USING GIN(attributes);
+CREATE UNIQUE INDEX idx_principal_groups_name_tenant ON principal_groups(name, tenant_id);
 
-CREATE TABLE group_members (
-    group_id    UUID        NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+CREATE TABLE principal_group_members (
+    group_id    UUID        NOT NULL REFERENCES principal_groups(id) ON DELETE CASCADE,
     entity_id   UUID        NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (group_id, entity_id)
 );
 
-CREATE INDEX idx_group_members_entity ON group_members(entity_id);
+CREATE INDEX idx_principal_group_members_entity ON principal_group_members(entity_id);
 
-CREATE TABLE group_hierarchy (
-    parent_id  UUID        NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-    child_id   UUID        NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+CREATE TABLE principal_group_hierarchy (
+    parent_id  UUID        NOT NULL REFERENCES principal_groups(id) ON DELETE CASCADE,
+    child_id   UUID        NOT NULL REFERENCES principal_groups(id) ON DELETE CASCADE,
     tenant_id  UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -280,8 +277,57 @@ CREATE TABLE group_hierarchy (
     CHECK (parent_id <> child_id)
 );
 
-CREATE INDEX idx_group_hierarchy_parent ON group_hierarchy(parent_id);
-CREATE INDEX idx_group_hierarchy_tenant ON group_hierarchy(tenant_id);
+CREATE INDEX idx_principal_group_hierarchy_parent ON principal_group_hierarchy(parent_id);
+CREATE INDEX idx_principal_group_hierarchy_tenant ON principal_group_hierarchy(tenant_id);
+
+CREATE TABLE object_groups (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT        NOT NULL,
+    tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
+    description TEXT,
+    status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
+    attributes  JSONB       NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_object_groups_tenant ON object_groups(tenant_id);
+CREATE INDEX idx_object_groups_status ON object_groups(status);
+CREATE INDEX idx_object_groups_attrs ON object_groups USING GIN(attributes);
+CREATE UNIQUE INDEX idx_object_groups_name_tenant ON object_groups(name, tenant_id);
+
+CREATE TABLE object_group_hierarchy (
+    parent_id  UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
+    child_id   UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
+    tenant_id  UUID        REFERENCES tenants(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (child_id),
+    CHECK (parent_id <> child_id)
+);
+
+CREATE INDEX idx_object_group_hierarchy_parent ON object_group_hierarchy(parent_id);
+CREATE INDEX idx_object_group_hierarchy_tenant ON object_group_hierarchy(tenant_id);
+
+-- Compatibility read views for code paths that still use the generic "group"
+-- shape. Physical storage is split into Principal Groups and Object Groups.
+CREATE VIEW groups AS
+SELECT id, name, tenant_id, 'object'::text AS group_type, description, status, attributes, created_at, updated_at
+FROM object_groups
+UNION ALL
+SELECT id, name, tenant_id, 'principal'::text AS group_type, description, status, attributes, created_at, updated_at
+FROM principal_groups;
+
+CREATE VIEW group_members AS
+SELECT group_id, entity_id, created_at
+FROM principal_group_members;
+
+CREATE VIEW group_hierarchy AS
+SELECT parent_id, child_id, tenant_id, created_at, updated_at
+FROM principal_group_hierarchy
+UNION ALL
+SELECT parent_id, child_id, tenant_id, created_at, updated_at
+FROM object_group_hierarchy;
 
 CREATE TABLE tenant_memberships (
     tenant_id   UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -313,8 +359,8 @@ CREATE INDEX idx_resources_tenant ON resources(tenant_id);
 CREATE INDEX idx_resources_owner ON resources(owner_id);
 CREATE INDEX idx_resources_attrs ON resources USING GIN(attributes);
 
-CREATE TABLE group_entity_parents (
-    group_id    UUID        NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+CREATE TABLE object_group_entities (
+    group_id    UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
     entity_id   UUID        NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     tenant_id   UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -322,11 +368,11 @@ CREATE TABLE group_entity_parents (
     PRIMARY KEY (entity_id)
 );
 
-CREATE INDEX idx_group_entity_parents_group ON group_entity_parents(group_id);
-CREATE INDEX idx_group_entity_parents_tenant ON group_entity_parents(tenant_id);
+CREATE INDEX idx_object_group_entities_group ON object_group_entities(group_id);
+CREATE INDEX idx_object_group_entities_tenant ON object_group_entities(tenant_id);
 
-CREATE TABLE group_resource_parents (
-    group_id     UUID        NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+CREATE TABLE object_group_resources (
+    group_id     UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
     resource_id  UUID        NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
     tenant_id    UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -334,8 +380,16 @@ CREATE TABLE group_resource_parents (
     PRIMARY KEY (resource_id)
 );
 
-CREATE INDEX idx_group_resource_parents_group ON group_resource_parents(group_id);
-CREATE INDEX idx_group_resource_parents_tenant ON group_resource_parents(tenant_id);
+CREATE INDEX idx_object_group_resources_group ON object_group_resources(group_id);
+CREATE INDEX idx_object_group_resources_tenant ON object_group_resources(tenant_id);
+
+CREATE VIEW group_entity_parents AS
+SELECT group_id, entity_id, tenant_id, created_at, updated_at
+FROM object_group_entities;
+
+CREATE VIEW group_resource_parents AS
+SELECT group_id, resource_id, tenant_id, created_at, updated_at
+FROM object_group_resources;
 
 CREATE TABLE ownerships (
     owner_id    UUID        NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -353,106 +407,180 @@ CREATE TABLE roles (
     name        TEXT        NOT NULL,
     tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
     description TEXT,
-    scope_kind  TEXT        NOT NULL CHECK (scope_kind IN ('platform', 'tenant', 'object_kind', 'object_type', 'object', 'group_object_type', 'group_tree_object_type', 'group_child_kind', 'group_descendant_kind')),
-    scope_ref   TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ
 );
 
-CREATE UNIQUE INDEX idx_roles_name_tenant_scope
-    ON roles(name, COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), scope_kind, COALESCE(scope_ref, ''));
+CREATE UNIQUE INDEX idx_roles_name_tenant
+    ON roles(name, COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid));
 
-CREATE INDEX idx_roles_scope ON roles(scope_kind, scope_ref);
-
-CREATE TABLE capabilities (
+CREATE TABLE actions (
     id              UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT    NOT NULL,
-    resource_kind   TEXT,
     description     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ,
-    UNIQUE (name, resource_kind)
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (name)
 );
 
-CREATE TABLE capability_applicability (
-    capability_id UUID NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
-    object_kind   TEXT NOT NULL CHECK (object_kind IN ('entity', 'resource', 'group', 'tenant', 'role', 'policy', 'credential', 'audit_log')),
+CREATE TABLE action_applicability (
+    action_id   UUID NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+    object_kind   TEXT NOT NULL CHECK (object_kind IN ('entity', 'resource', 'group', 'tenant', 'role', 'policy', 'credential', 'audit_log', 'signing_key')),
     object_type   TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (capability_id, object_kind, object_type)
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_capability_applicability_object ON capability_applicability(object_kind, object_type);
+CREATE UNIQUE INDEX idx_action_applicability_unique
+    ON action_applicability(action_id, object_kind, COALESCE(object_type, ''));
+CREATE INDEX idx_action_applicability_object ON action_applicability(object_kind, object_type);
 
-CREATE TABLE role_permission_blocks (
+CREATE TABLE permission_blocks (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    role_id     UUID        NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    applies_to  TEXT        NOT NULL CHECK (applies_to IN ('platform', 'tenant', 'object_kind', 'object_type', 'object', 'object_group_type', 'object_group_tree_type', 'object_group_child_kind', 'object_group_descendant_kind')),
-    object_id   UUID,
+    tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
+    scope_mode  TEXT        NOT NULL CHECK (scope_mode IN ('platform', 'tenant', 'object_kind', 'object_type', 'object', 'group', 'group_direct_objects', 'group_descendant_objects', 'group_child_groups', 'group_descendant_groups')),
     object_kind TEXT,
     object_type TEXT,
-    tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
-    group_id    UUID        REFERENCES groups(id) ON DELETE CASCADE,
+    object_id   UUID,
+    group_id    UUID        REFERENCES object_groups(id) ON DELETE CASCADE,
+    effect      TEXT        NOT NULL DEFAULT 'allow' CHECK (effect IN ('allow', 'deny')),
+    conditions  JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (
-        (applies_to = 'platform' AND tenant_id IS NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
-        OR (applies_to = 'tenant' AND tenant_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
-        OR (applies_to = 'object_kind' AND object_kind IS NOT NULL AND tenant_id IS NULL AND object_id IS NULL AND object_type IS NULL AND group_id IS NULL)
-        OR (applies_to = 'object_type' AND object_kind IS NOT NULL AND object_type IS NOT NULL AND tenant_id IS NULL AND object_id IS NULL AND group_id IS NULL)
-        OR (applies_to = 'object' AND object_id IS NOT NULL AND tenant_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
-        OR (applies_to IN ('object_group_type', 'object_group_tree_type') AND group_id IS NOT NULL AND object_kind IS NOT NULL AND object_type IS NOT NULL AND tenant_id IS NULL AND object_id IS NULL)
-        OR (applies_to IN ('object_group_child_kind', 'object_group_descendant_kind') AND group_id IS NOT NULL AND object_kind IS NOT NULL AND tenant_id IS NULL AND object_id IS NULL AND object_type IS NULL)
+        (scope_mode = 'platform' AND tenant_id IS NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
+        OR (scope_mode = 'tenant' AND tenant_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
+        OR (scope_mode = 'object_kind' AND tenant_id IS NOT NULL AND object_kind IS NOT NULL AND object_id IS NULL AND object_type IS NULL AND group_id IS NULL)
+        OR (scope_mode = 'object_type' AND tenant_id IS NOT NULL AND object_kind IS NOT NULL AND object_type IS NOT NULL AND object_id IS NULL AND group_id IS NULL)
+        OR (scope_mode = 'object' AND object_id IS NOT NULL AND group_id IS NULL)
+        OR (scope_mode = 'group' AND tenant_id IS NOT NULL AND group_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL)
+        OR (scope_mode IN ('group_direct_objects', 'group_descendant_objects') AND tenant_id IS NOT NULL AND group_id IS NOT NULL AND object_kind IN ('entity', 'resource') AND object_id IS NULL)
+        OR (scope_mode IN ('group_child_groups', 'group_descendant_groups') AND tenant_id IS NOT NULL AND group_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL)
     )
 );
 
-CREATE INDEX idx_role_permission_blocks_role ON role_permission_blocks(role_id);
-CREATE INDEX idx_role_permission_blocks_tenant ON role_permission_blocks(tenant_id);
-CREATE INDEX idx_role_permission_blocks_object ON role_permission_blocks(object_id);
-CREATE INDEX idx_role_permission_blocks_group ON role_permission_blocks(group_id);
+CREATE INDEX idx_permission_blocks_tenant ON permission_blocks(tenant_id);
+CREATE INDEX idx_permission_blocks_scope ON permission_blocks(scope_mode, object_kind, object_type);
+CREATE INDEX idx_permission_blocks_object ON permission_blocks(object_id);
+CREATE INDEX idx_permission_blocks_group ON permission_blocks(group_id);
 
-CREATE TABLE role_permission_actions (
-    block_id      UUID NOT NULL REFERENCES role_permission_blocks(id) ON DELETE CASCADE,
-    capability_id UUID NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
-    PRIMARY KEY (block_id, capability_id)
+CREATE TABLE permission_block_actions (
+    permission_block_id UUID NOT NULL REFERENCES permission_blocks(id) ON DELETE CASCADE,
+    action_id           UUID NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+    PRIMARY KEY (permission_block_id, action_id)
 );
 
-CREATE INDEX idx_role_permission_actions_capability ON role_permission_actions(capability_id);
+CREATE INDEX idx_permission_block_actions_action ON permission_block_actions(action_id);
 
-CREATE TABLE role_capabilities (
-    role_id         UUID    NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    capability_id   UUID    NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
-    PRIMARY KEY (role_id, capability_id)
+CREATE TABLE role_permission_blocks (
+    id                  UUID GENERATED ALWAYS AS (permission_block_id) STORED,
+    role_id             UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    permission_block_id UUID NOT NULL REFERENCES permission_blocks(id) ON DELETE CASCADE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (role_id, permission_block_id)
 );
 
-CREATE TABLE role_composites (
-    parent_role_id UUID        NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    child_role_id  UUID        NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (parent_role_id, child_role_id),
-    CHECK (parent_role_id <> child_role_id)
+CREATE INDEX idx_role_permission_blocks_block ON role_permission_blocks(permission_block_id);
+
+CREATE TABLE role_assignments (
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id    UUID        REFERENCES tenants(id) ON DELETE CASCADE,
+    subject_kind TEXT        NOT NULL CHECK (subject_kind IN ('entity', 'group')),
+    subject_id   UUID        NOT NULL,
+    role_id      UUID        NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_role_composites_child ON role_composites(child_role_id);
+CREATE INDEX idx_role_assignments_tenant ON role_assignments(tenant_id);
+CREATE INDEX idx_role_assignments_subject ON role_assignments(subject_kind, subject_id);
+CREATE INDEX idx_role_assignments_role ON role_assignments(role_id);
 
-CREATE TABLE policy_bindings (
+CREATE TABLE direct_policies (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id           UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     subject_kind        TEXT        NOT NULL CHECK (subject_kind IN ('entity', 'group')),
     subject_id          UUID        NOT NULL,
-    grant_kind          TEXT        NOT NULL CHECK (grant_kind IN ('capability', 'role')),
-    grant_id            UUID        NOT NULL,
-    scope_kind          TEXT        NOT NULL CHECK (scope_kind IN ('platform', 'tenant', 'object_kind', 'object_type', 'object', 'group_object_type', 'group_tree_object_type', 'group_child_kind', 'group_descendant_kind')),
-    scope_ref           TEXT,
-    effect              TEXT        NOT NULL DEFAULT 'allow' CHECK (effect IN ('allow', 'deny')),
-    conditions          JSONB       NOT NULL DEFAULT '{}',
+    permission_block_id UUID        NOT NULL REFERENCES permission_blocks(id) ON DELETE CASCADE,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_pb_tenant ON policy_bindings(tenant_id);
-CREATE INDEX idx_pb_subject ON policy_bindings(subject_kind, subject_id);
-CREATE INDEX idx_pb_grant ON policy_bindings(grant_kind, grant_id);
-CREATE INDEX idx_pb_scope ON policy_bindings(scope_kind, scope_ref);
+CREATE INDEX idx_direct_policies_tenant ON direct_policies(tenant_id);
+CREATE INDEX idx_direct_policies_subject ON direct_policies(subject_kind, subject_id);
+CREATE INDEX idx_direct_policies_block ON direct_policies(permission_block_id);
+
+-- Internal canonical access-edge helpers used by the PDP and authorization
+-- listing queries. They are not public compatibility API.
+CREATE FUNCTION effective_role_actions()
+RETURNS TABLE(role_id UUID, capability_id UUID)
+LANGUAGE sql
+STABLE
+AS $$
+SELECT rpb.role_id, pba.action_id AS capability_id
+FROM role_permission_blocks rpb
+JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id;
+$$;
+
+CREATE FUNCTION effective_access_edges()
+RETURNS TABLE(
+    id UUID,
+    tenant_id UUID,
+    subject_kind TEXT,
+    subject_id UUID,
+    grant_kind TEXT,
+    grant_id UUID,
+    scope_kind TEXT,
+    scope_ref TEXT,
+    effect TEXT,
+    conditions JSONB,
+    created_at TIMESTAMPTZ
+)
+LANGUAGE sql
+STABLE
+AS $$
+SELECT
+    dp.id,
+    dp.tenant_id,
+    dp.subject_kind,
+    dp.subject_id,
+    'capability'::text AS grant_kind,
+    pba.action_id AS grant_id,
+    CASE
+        WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+        WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+        WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+        WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+        ELSE pb.scope_mode
+    END AS scope_kind,
+    CASE
+        WHEN pb.scope_mode = 'platform' THEN NULL
+        WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+        WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+        WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+        WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+        WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+        WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+        WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
+    END AS scope_ref,
+    pb.effect,
+    pb.conditions,
+    dp.created_at
+FROM direct_policies dp
+JOIN permission_blocks pb ON pb.id = dp.permission_block_id
+JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+UNION ALL
+SELECT
+    ra.id,
+    ra.tenant_id,
+    ra.subject_kind,
+    ra.subject_id,
+    'role'::text AS grant_kind,
+    ra.role_id AS grant_id,
+    CASE WHEN ra.tenant_id IS NULL THEN 'platform' ELSE 'tenant' END AS scope_kind,
+    ra.tenant_id::text AS scope_ref,
+    'allow'::text AS effect,
+    '{}'::jsonb AS conditions,
+    ra.created_at
+FROM role_assignments ra;
+$$;
 
 CREATE TABLE audit_logs (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -469,20 +597,20 @@ CREATE INDEX idx_audit_entity ON audit_logs(entity_id);
 CREATE INDEX idx_audit_event ON audit_logs(event);
 CREATE INDEX idx_audit_time ON audit_logs(created_at DESC);
 
-CREATE TABLE capability_assignment_rules (
+CREATE TABLE action_assignment_rules (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id       UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     entity_kind     TEXT        NOT NULL CHECK (entity_kind IN ('human', 'device', 'service', 'workload', 'application')),
-    capability_name TEXT        NOT NULL,
-    object_kind     TEXT        NOT NULL CHECK (object_kind IN ('entity', 'resource', 'group', 'tenant', 'role', 'policy', 'credential', 'audit_log')),
+    action_name     TEXT        NOT NULL,
+    object_kind     TEXT        NOT NULL CHECK (object_kind IN ('entity', 'resource', 'group', 'tenant', 'role', 'policy', 'credential', 'audit_log', 'signing_key')),
     object_type     TEXT,
     decision        TEXT        NOT NULL CHECK (decision IN ('allow', 'deny', 'require_override')),
     is_absolute     BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_car_tenant ON capability_assignment_rules(tenant_id);
-CREATE INDEX idx_car_lookup ON capability_assignment_rules(entity_kind, capability_name, object_kind);
+CREATE INDEX idx_aar_tenant ON action_assignment_rules(tenant_id);
+CREATE INDEX idx_aar_lookup ON action_assignment_rules(entity_kind, action_name, object_kind);
 
 CREATE TABLE tenant_invitations (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -596,52 +724,24 @@ INSERT INTO profile_versions (profile_id, version, json_schema, ui_schema)
 SELECT id, 1, '{}'::jsonb, '{}'::jsonb
 FROM seeded_profiles;
 
-INSERT INTO capabilities (name, resource_kind, description) VALUES
-    ('read',                NULL, 'Read / view a resource'),
-    ('write',               NULL, 'Create or update a resource'),
-    ('delete',              NULL, 'Delete a resource'),
-    ('publish',             NULL, 'Publish messages to a resource'),
-    ('subscribe',           NULL, 'Subscribe to messages from a resource'),
-    ('execute',             NULL, 'Execute a command or action'),
-    ('manage',              NULL, 'Full administrative control'),
-    ('list',                NULL, 'List resources'),
-    ('credential.manage',   NULL, 'Manage credentials'),
-    ('credential.revoke',   NULL, 'Revoke credentials'),
-    ('signing_key.rotate',  NULL, 'Rotate JWT signing keys'),
-    ('audit.read',          NULL, 'Read audit logs'),
-    ('policy.manage',       NULL, 'Manage policies'),
-    ('role.manage',         NULL, 'Manage roles'),
-    ('tenant.manage',       NULL, 'Manage tenants (lifecycle and metadata)'),
-    ('authz.check',         NULL, 'Evaluate authorization checks for other subjects'),
-    ('tenant.create',       NULL, 'Create tenants/domains'),
-    ('list',                'channel', 'List channels'),
-    ('read',                'channel', 'Read channel metadata'),
-    ('write',               'channel', 'Create or update channels'),
-    ('delete',              'channel', 'Delete channels'),
-    ('manage',              'channel', 'Manage channel policies and metadata'),
-    ('publish',             'channel', 'Publish messages to channels'),
-    ('subscribe',           'channel', 'Subscribe to channel messages'),
-    ('list',                'rule', 'List rules'),
-    ('read',                'rule', 'Read rule metadata'),
-    ('write',               'rule', 'Create or update rules'),
-    ('delete',              'rule', 'Delete rules'),
-    ('manage',              'rule', 'Manage rule policies and metadata'),
-    ('execute',             'rule', 'Execute rule actions'),
-    ('list',                'alarm', 'List alarms'),
-    ('read',                'alarm', 'Read alarm metadata'),
-    ('write',               'alarm', 'Create or update alarms'),
-    ('delete',              'alarm', 'Delete alarms'),
-    ('manage',              'alarm', 'Manage alarm policies and metadata'),
-    ('list',                'report', 'List reports'),
-    ('read',                'report', 'Read report metadata'),
-    ('write',               'report', 'Create or update reports'),
-    ('delete',              'report', 'Delete reports'),
-    ('manage',              'report', 'Manage report policies and metadata'),
-    ('execute',             'report', 'Generate or send reports');
+INSERT INTO actions (name, description) VALUES
+    ('read',                'Read / view an object'),
+    ('create',              'Create an object'),
+    ('write',               'Create or update an object'),
+    ('delete',              'Delete an object'),
+    ('revoke',              'Revoke an object or credential'),
+    ('rotate',              'Rotate a key or secret material'),
+    ('publish',             'Publish messages to a channel'),
+    ('subscribe',           'Subscribe to channel messages'),
+    ('execute',             'Execute a command or action'),
+    ('manage',              'Full administrative control'),
+    ('policy.manage',       'Manage assignments and policy records'),
+    ('role.manage',         'Manage roles'),
+    ('authz.check',         'Evaluate authorization checks for other subjects');
 
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
+INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, object_kind, object_type
-FROM capabilities
+FROM actions
 CROSS JOIN LATERAL (
     VALUES
         ('entity', 'entity:human'),
@@ -653,72 +753,90 @@ CROSS JOIN LATERAL (
         ('resource', 'resource:rule'),
         ('resource', 'resource:report'),
         ('resource', 'resource:alarm'),
-        ('group', NULL),
-        ('tenant', NULL)
+        ('group', NULL)
 ) AS applicability(object_kind, object_type)
-WHERE capabilities.name IN ('read', 'write', 'delete')
-  AND capabilities.resource_kind IS NULL;
+WHERE actions.name IN ('read', 'write', 'delete')
+;
 
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
+INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, 'resource', 'resource:channel'
-FROM capabilities
-WHERE name IN ('list', 'read', 'write', 'delete', 'manage', 'publish', 'subscribe')
-  AND (resource_kind = 'channel' OR (resource_kind IS NULL AND name IN ('publish', 'subscribe')))
+FROM actions
+WHERE name IN ('read', 'write', 'delete', 'manage', 'publish', 'subscribe')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
+INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, 'resource', 'resource:rule'
-FROM capabilities
-WHERE name IN ('list', 'read', 'write', 'delete', 'manage', 'execute')
-  AND (resource_kind = 'rule' OR (resource_kind IS NULL AND name = 'execute'))
+FROM actions
+WHERE name IN ('read', 'write', 'delete', 'manage', 'execute')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
+INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, 'resource', 'resource:report'
-FROM capabilities
-WHERE name IN ('list', 'read', 'write', 'delete', 'manage', 'execute')
-  AND (resource_kind = 'report' OR (resource_kind IS NULL AND name = 'execute'))
+FROM actions
+WHERE name IN ('read', 'write', 'delete', 'manage', 'execute')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
+INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, 'resource', 'resource:alarm'
-FROM capabilities
-WHERE name IN ('list', 'read', 'write', 'delete', 'manage')
-  AND resource_kind = 'alarm'
+FROM actions
+WHERE name IN ('read', 'write', 'delete', 'manage')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
-SELECT id, 'resource', object_type
-FROM capabilities
-CROSS JOIN LATERAL (
-    VALUES ('resource:rule'), ('resource:report')
-) AS applicability(object_type)
-WHERE name = 'execute'
-  AND resource_kind IS NULL
-ON CONFLICT DO NOTHING;
-
-INSERT INTO capability_applicability (capability_id, object_kind, object_type)
+INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, object_kind, object_type
-FROM capabilities
+FROM actions
 CROSS JOIN LATERAL (
     VALUES
         ('tenant', NULL),
         ('entity', NULL),
         ('resource', NULL),
-        ('group', NULL),
-        ('role', NULL),
-        ('policy', NULL),
-        ('credential', NULL),
+        ('group', NULL)
+) AS applicability(object_kind, object_type)
+WHERE actions.name IN ('manage', 'role.manage', 'policy.manage');
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, 'role', NULL
+FROM actions
+WHERE actions.name = 'role.manage'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, 'policy', NULL
+FROM actions
+WHERE actions.name = 'policy.manage'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, object_kind, object_type
+FROM actions
+CROSS JOIN LATERAL (
+    VALUES
+        ('credential', NULL)
+) AS applicability(object_kind, object_type)
+WHERE actions.name IN ('manage', 'revoke')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, object_kind, object_type
+FROM actions
+CROSS JOIN LATERAL (
+    VALUES
         ('audit_log', NULL)
 ) AS applicability(object_kind, object_type)
-WHERE capabilities.name IN (
-    'manage',
-    'role.manage',
-    'policy.manage',
-    'credential.manage',
-    'audit.read',
-    'tenant.manage'
-);
+WHERE actions.name = 'read'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, 'tenant', NULL
+FROM actions
+WHERE actions.name IN ('read', 'create', 'manage')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, 'signing_key', NULL
+FROM actions
+WHERE actions.name = 'rotate'
+ON CONFLICT DO NOTHING;
 
 INSERT INTO entities (id, kind, name, status, attributes)
 VALUES
@@ -737,106 +855,96 @@ VALUES
         '{"system": true, "purpose": "magistrala-service-integration"}'::jsonb
     );
 
-INSERT INTO roles (id, name, description, scope_kind, scope_ref)
+INSERT INTO roles (id, name, description)
 VALUES
     (
         '00000000-0000-0000-0000-000000000002',
         'atom-admin',
-        'Full administrative access',
-        'platform',
-        NULL
+        'Full administrative access'
     ),
     (
         '00000000-0000-0000-0000-000000000004',
         'mg-service',
-        'Magistrala service integration role',
-        'platform',
-        NULL
+        'Magistrala service integration role'
     ),
     (
         '00000000-0000-0000-0000-000000000006',
         'domain-creator',
-        'Allows authenticated users to create their own tenants/domains',
-        'platform',
-        NULL
+        'Allows authenticated users to create their own tenants/domains'
     );
 
-INSERT INTO role_capabilities (role_id, capability_id)
-SELECT '00000000-0000-0000-0000-000000000002', id
-FROM capabilities;
+INSERT INTO permission_blocks (id, scope_mode, effect, conditions)
+VALUES
+    ('00000000-0000-0000-0000-000000000007', 'platform', 'allow', '{}'::jsonb),
+    ('00000000-0000-0000-0000-000000000008', 'platform', 'allow', '{}'::jsonb),
+    ('00000000-0000-0000-0000-000000000009', 'platform', 'allow', '{}'::jsonb);
 
-INSERT INTO role_capabilities (role_id, capability_id)
-SELECT '00000000-0000-0000-0000-000000000004', id
-FROM capabilities
+INSERT INTO permission_block_actions (permission_block_id, action_id)
+SELECT '00000000-0000-0000-0000-000000000007', id
+FROM actions;
+
+INSERT INTO permission_block_actions (permission_block_id, action_id)
+SELECT '00000000-0000-0000-0000-000000000008', id
+FROM actions
 WHERE name IN (
-    'manage', 'list', 'read', 'write', 'delete', 'publish', 'subscribe',
-    'execute', 'policy.manage', 'role.manage', 'authz.check', 'credential.manage'
+    'manage', 'read', 'write', 'delete', 'publish', 'subscribe',
+    'execute', 'policy.manage', 'role.manage', 'authz.check'
 );
 
-INSERT INTO role_capabilities (role_id, capability_id)
-SELECT '00000000-0000-0000-0000-000000000006', id
-FROM capabilities
-WHERE name = 'tenant.create' AND resource_kind IS NULL;
+INSERT INTO permission_block_actions (permission_block_id, action_id)
+SELECT '00000000-0000-0000-0000-000000000009', id
+FROM actions
+WHERE name = 'create';
 
-INSERT INTO groups (id, name, tenant_id, group_type, description, status, attributes)
+INSERT INTO role_permission_blocks (role_id, permission_block_id)
+VALUES
+    ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000007'),
+    ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000008'),
+    ('00000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-000000000009');
+
+INSERT INTO principal_groups (id, name, tenant_id, description, status, attributes)
 VALUES (
     '00000000-0000-0000-0000-000000000005',
     'authenticated-users',
     NULL,
-    'principal',
     'All authenticated human users',
     'active',
     '{"system": true, "purpose": "default-self-service-domain-creation"}'::jsonb
 );
 
-INSERT INTO group_members (group_id, entity_id)
+INSERT INTO principal_group_members (group_id, entity_id)
 VALUES (
     '00000000-0000-0000-0000-000000000005',
     '00000000-0000-0000-0000-000000000001'
 );
 
-INSERT INTO policy_bindings
-    (id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
+INSERT INTO role_assignments
+    (id, tenant_id, subject_kind, subject_id, role_id)
 VALUES
     (
         '00000000-0000-0000-0000-000000000001',
         NULL,
         'entity',
         '00000000-0000-0000-0000-000000000001',
-        'role',
-        '00000000-0000-0000-0000-000000000002',
-        'platform',
-        NULL,
-        'allow',
-        '{}'::jsonb
+        '00000000-0000-0000-0000-000000000002'
     ),
     (
         gen_random_uuid(),
         NULL,
         'entity',
         '00000000-0000-0000-0000-000000000003',
-        'role',
-        '00000000-0000-0000-0000-000000000004',
-        'platform',
-        NULL,
-        'allow',
-        '{}'::jsonb
+        '00000000-0000-0000-0000-000000000004'
     ),
     (
         gen_random_uuid(),
         NULL,
         'group',
         '00000000-0000-0000-0000-000000000005',
-        'role',
-        '00000000-0000-0000-0000-000000000006',
-        'platform',
-        NULL,
-        'allow',
-        '{}'::jsonb
+        '00000000-0000-0000-0000-000000000006'
     );
 
-INSERT INTO capability_assignment_rules
-    (entity_kind, capability_name, object_kind, object_type, decision, is_absolute)
+INSERT INTO action_assignment_rules
+    (entity_kind, action_name, object_kind, object_type, decision, is_absolute)
 VALUES
     ('device', 'manage', 'resource', NULL, 'deny', TRUE),
     ('device', 'delete', 'resource', NULL, 'deny', TRUE),
@@ -846,8 +954,11 @@ VALUES
     ('human', 'manage', 'resource', NULL, 'allow', FALSE),
     ('human', 'manage', 'entity', NULL, 'allow', FALSE),
     ('human', 'manage', 'group', NULL, 'allow', FALSE),
+    ('human', 'manage', 'credential', NULL, 'allow', FALSE),
+    ('human', 'read', 'audit_log', NULL, 'allow', FALSE),
     ('human', 'policy.manage', 'policy', NULL, 'allow', FALSE),
     ('human', 'role.manage', 'role', NULL, 'allow', FALSE),
     ('service', 'manage', 'resource', NULL, 'allow', FALSE),
+    ('service', 'manage', 'credential', NULL, 'allow', FALSE),
     ('service', 'policy.manage', 'policy', NULL, 'allow', FALSE),
     ('service', 'role.manage', 'role', NULL, 'allow', FALSE);

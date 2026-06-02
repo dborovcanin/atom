@@ -172,12 +172,7 @@ pub(crate) async fn require_list_access(
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
     let scope = scope_for_tenant(tenant_id);
-    require_any_capability(
-        pool,
-        entity_id,
-        &[("list", scope), ("read", scope), ("manage", scope)],
-    )
-    .await
+    require_any_capability(pool, entity_id, &[("read", scope), ("manage", scope)]).await
 }
 
 pub(crate) async fn require_read_access(
@@ -206,12 +201,7 @@ pub(crate) async fn require_role_read(
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
     let scope = scope_for_tenant(tenant_id);
-    require_any_capability(
-        pool,
-        entity_id,
-        &[("role.manage", scope), ("read", scope), ("list", scope)],
-    )
-    .await
+    require_any_capability(pool, entity_id, &[("role.manage", scope), ("read", scope)]).await
 }
 
 pub(crate) async fn require_policy_read(
@@ -223,12 +213,7 @@ pub(crate) async fn require_policy_read(
     require_any_capability(
         pool,
         entity_id,
-        &[
-            ("policy.manage", scope),
-            ("read", scope),
-            ("list", scope),
-            ("manage", scope),
-        ],
+        &[("policy.manage", scope), ("read", scope), ("manage", scope)],
     )
     .await
 }
@@ -259,7 +244,7 @@ pub(crate) async fn require_credential_management(
     if has_capability_in_scope(
         &state.pool,
         actor_id,
-        "credential.manage",
+        "manage",
         Scope::Object(target_entity_id),
     )
     .await
@@ -270,7 +255,7 @@ pub(crate) async fn require_credential_management(
     require_capability(
         &state.pool,
         actor_id,
-        "credential.manage",
+        "manage",
         scope_for_tenant(target.tenant_id),
     )
     .await

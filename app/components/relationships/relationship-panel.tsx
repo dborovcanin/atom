@@ -1,10 +1,4 @@
-import {
-  ArrowRight,
-  GitBranch,
-  Network,
-  ShieldCheck,
-  Users,
-} from "lucide-react";
+import { ArrowRight, Network, ShieldCheck, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -17,24 +11,24 @@ import {
 const relationships = [
   {
     icon: Users,
-    source: "floor-sensors",
-    relation: "membership",
-    target: "sensor-gateway-01",
-    kind: "inherited",
+    source: "Principal Group Operators",
+    relation: "contains",
+    target: "user1",
+    kind: "who",
   },
   {
     icon: ShieldCheck,
-    source: "publisher",
-    relation: "expands to",
-    target: "publish",
+    source: "Plant operator role",
+    relation: "allows",
+    target: "read + publish",
     kind: "role",
   },
   {
-    icon: GitBranch,
-    source: "deny policy",
-    relation: "overrides",
-    target: "allow policy",
-    kind: "precedence",
+    icon: Network,
+    source: "Object Group Plant-A",
+    relation: "contains",
+    target: "channels",
+    kind: "where",
   },
 ];
 

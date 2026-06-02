@@ -69,9 +69,10 @@ async fn tenant_creation_bootstraps_admin_role_capabilities_binding_and_membersh
 
     let capabilities: Vec<String> = sqlx::query_scalar(
         r#"SELECT DISTINCT c.name
-           FROM role_capabilities rc
-           JOIN capabilities c ON c.id = rc.capability_id
-           WHERE rc.role_id = $1
+           FROM role_permission_blocks rpb
+           JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+           JOIN actions c ON c.id = pba.action_id
+           WHERE rpb.role_id = $1
            ORDER BY c.name"#,
     )
     .bind(role_id)
@@ -81,11 +82,8 @@ async fn tenant_creation_bootstraps_admin_role_capabilities_binding_and_membersh
     assert_eq!(
         capabilities,
         vec![
-            "audit.read",
-            "credential.manage",
             "delete",
             "execute",
-            "list",
             "manage",
             "policy.manage",
             "publish",
@@ -99,19 +97,15 @@ async fn tenant_creation_bootstraps_admin_role_capabilities_binding_and_membersh
 
     let binding_count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
-           FROM policy_bindings
+           FROM role_assignments
            WHERE tenant_id = $1
              AND subject_kind = 'entity'
              AND subject_id = $2
-             AND grant_kind = 'role'
-             AND grant_id = $3
-             AND scope_kind = 'tenant'
-             AND scope_ref = $4"#,
+             AND role_id = $3"#,
     )
     .bind(tenant_id)
     .bind(creator)
     .bind(role_id)
-    .bind(tenant_id.to_string())
     .fetch_one(&p)
     .await
     .expect("binding count");
@@ -136,7 +130,7 @@ async fn non_human_creator_gets_binding_but_no_tenant_membership() {
     let tenant_id = create_tenant(&p, creator).await;
 
     let binding_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM policy_bindings WHERE tenant_id = $1 AND subject_id = $2",
+        "SELECT COUNT(*) FROM role_assignments WHERE tenant_id = $1 AND subject_id = $2",
     )
     .bind(tenant_id)
     .bind(creator)

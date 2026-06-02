@@ -17,7 +17,7 @@ use super::{
     types::{
         parse_id, parse_optional_audit_outcome, parse_optional_credential_kind, parse_optional_id,
         parse_optional_timestamp, AuditLog, AuditLogList, Credential, GqlAuditOutcome,
-        GqlCredentialKind, PolicyBinding, Resource,
+        GqlCredentialKind, OrphanPolicy, Resource,
     },
 };
 
@@ -97,7 +97,7 @@ impl AdminQuery {
         ctx: &Context<'_>,
         limit: Option<i32>,
         offset: Option<i32>,
-    ) -> Result<Vec<PolicyBinding>> {
+    ) -> Result<Vec<OrphanPolicy>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
@@ -112,11 +112,7 @@ impl AdminQuery {
         )
         .await
         .map_err(gql_error)?;
-        Ok(policies
-            .items
-            .into_iter()
-            .map(PolicyBinding::from)
-            .collect())
+        Ok(policies.items.into_iter().map(OrphanPolicy::from).collect())
     }
 
     async fn unprotected_resources(
@@ -195,14 +191,15 @@ async fn audit_tenant_filter(
     auth: &AuthContext,
     requested_tenant_id: Option<Uuid>,
 ) -> std::result::Result<Option<Vec<Uuid>>, AppError> {
-    if has_capability_in_scope(pool, auth.entity_id, "audit.read", Scope::Platform).await?
+    if has_capability_in_scope(pool, auth.entity_id, "read", Scope::Platform).await?
         || has_capability_in_scope(pool, auth.entity_id, "manage", Scope::Platform).await?
     {
         return Ok(None);
     }
 
     let mut tenant_ids =
-        authz_repo::tenant_ids_for_capability(pool, auth.entity_id, "audit.read").await?;
+        authz_repo::tenant_ids_for_action_on_object_kind(pool, auth.entity_id, "read", "audit_log")
+            .await?;
     tenant_ids.sort_unstable();
     tenant_ids.dedup();
 

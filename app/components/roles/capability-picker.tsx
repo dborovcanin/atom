@@ -10,11 +10,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  applicabilityValues,
+  capabilityLabel,
+  type CapabilityApplicability,
+} from "@/lib/access/capabilities";
 
 export type PickerCapability = {
   id: string;
   name: string;
-  resourceKind: string | null;
+  applicability?: CapabilityApplicability[] | null;
 };
 
 type Props = {
@@ -37,15 +42,15 @@ export function CapabilityPicker({
 
   return (
     <div className="grid gap-2">
-      <Label>Capabilities</Label>
+      <Label>Actions</Label>
       {selectedCaps.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {selectedCaps.map((cap) => (
             <Badge key={cap.id} variant="secondary" className="gap-1 pr-1">
               {cap.name}
-              {cap.resourceKind ? (
+              {applicabilityValues(cap).length > 0 ? (
                 <span className="text-muted-foreground">
-                  :{cap.resourceKind}
+                  @{applicabilityValues(cap).join(",")}
                 </span>
               ) : null}
               <button
@@ -62,7 +67,7 @@ export function CapabilityPicker({
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          No capabilities selected.
+          No actions selected.
         </p>
       )}
       {availableCaps.length > 0 && (
@@ -74,13 +79,12 @@ export function CapabilityPicker({
           }}
         >
           <SelectTrigger className="w-full">
-            <SelectValue placeholder="— add capability —" />
+            <SelectValue placeholder="— add action —" />
           </SelectTrigger>
           <SelectContent>
             {availableCaps.map((c) => (
               <SelectItem key={c.id} value={c.id}>
-                {c.name}
-                {c.resourceKind ? ` (${c.resourceKind})` : ""}
+                {capabilityLabel(c)}
               </SelectItem>
             ))}
           </SelectContent>

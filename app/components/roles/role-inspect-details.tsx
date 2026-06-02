@@ -77,12 +77,11 @@ export function RoleInspectDetails({ row }: { row: Row | null }) {
         </span>
       </Field>
 
-      <Field label="Applies to">
-        <span className="text-sm">
-          {String(row.scopeKind ?? "platform")}
-          {row.scopeRef ? ` · ${String(row.scopeRef)}` : ""}
-        </span>
-      </Field>
+      {row.derivedKind ? (
+        <Field label="Derived kind">
+          <span className="text-sm">{String(row.derivedKind)}</span>
+        </Field>
+      ) : null}
 
       {row.description ? (
         <Field label="Description">

@@ -1,4 +1,4 @@
-import type { CapabilityFormInitialValues } from "@/components/capabilities/capability-create-form";
+import type { CapabilityApplicabilityFormInitialValues } from "@/components/capabilities/capability-create-form";
 import type { Row } from "@/components/crud/table/types";
 import type { EntityFormInitialValues } from "@/components/entities/entity-create-form";
 import type { GroupFormInitialValues } from "@/components/groups/group-edit-form";
@@ -18,12 +18,23 @@ export function roleFormInitialValues(row: Row): RoleFormInitialValues {
 
 export function capabilityFormInitialValues(
   row: Row,
-): CapabilityFormInitialValues {
+): CapabilityApplicabilityFormInitialValues {
   return {
     id: String(row.id),
-    name: typeof row.name === "string" ? row.name : "",
-    resourceKind: typeof row.resourceKind === "string" ? row.resourceKind : "",
-    description: typeof row.description === "string" ? row.description : "",
+    capabilityId:
+      typeof row.actionId === "string"
+        ? row.actionId
+        : typeof row.capabilityId === "string"
+          ? row.capabilityId
+          : "",
+    capabilityName:
+      typeof row.actionName === "string"
+        ? row.actionName
+        : typeof row.capabilityName === "string"
+          ? row.capabilityName
+          : "",
+    objectKind: typeof row.objectKind === "string" ? row.objectKind : "",
+    objectType: typeof row.objectType === "string" ? row.objectType : "",
   };
 }
 

@@ -3,7 +3,7 @@ title: Overview
 description: Atom is a lightweight Identity and Authorization service for IoT and cloud-native systems.
 ---
 
-Atom is a single-binary replacement for Keycloak — an HTTP service that combines identity management and policy-based authorization in one deployable unit.
+Atom is a single-binary replacement for Keycloak — an HTTP service that combines identity management and authorization in one deployable unit.
 
 Built for [Magistrala](https://github.com/absmach/magistrala), but generic enough for any cloud-native or edge system.
 
@@ -13,14 +13,22 @@ Built for [Magistrala](https://github.com/absmach/magistrala), but generic enoug
 |---|---|
 | **Identity** | CRUD for any principal type — humans, devices, services, workloads, applications. All are first-class _entities_. |
 | **Authentication** | Password login returning a JWT, long-lived API keys, session management with revocation. |
-| **Authorization** | Policy-based decision engine (PDP) supporting RBAC, ABAC, and hybrid policies evaluated at runtime. |
-| **Grouping** | Entities belong to groups; policies apply to groups. |
+| **Authorization** | Actions, Permission Blocks, Roles, Role Assignments, Direct Policies, and ABAC guardrails evaluated at runtime. |
+| **Grouping** | Principal Groups define who receives roles; Object Groups define where access applies. |
 | **Ownership** | Parent–child relationships between entities. |
-| **Multi-tenancy** | All resources are tenant-scoped. |
+| **Multi-tenancy** | First-class tenants. Magistrala domains map directly to Atom tenants. |
+
+## Source of truth
+
+This docs site is an operator/developer guide. The product source of truth lives in:
+
+- [PRD](https://github.com/absmach/atom/blob/main/product-docs/PRD.md)
+- [Access model](https://github.com/absmach/atom/blob/main/product-docs/11-access-model-simplification.md)
+- [Magistrala integration](https://github.com/absmach/atom/blob/main/product-docs/10-magistrala-on-atom.md)
 
 ## GraphQL
 
-Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as REST. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, capabilities, policies, authz checks, audit logs, and profile-driven entity creation. REST remains available for Auth/OIDC and custom endpoint execution.
+Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as Auth/OIDC REST endpoints. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, actions, permission blocks, role assignments, Direct Policies, authz checks, audit logs, and profile-driven entity creation. Non-GraphQL public endpoints are intentionally limited to Auth/OIDC, health, JWKS, and custom endpoint execution.
 
 The Atom Next UI is a separate optional frontend. In Docker Compose it is enabled with the `atom-ui` profile and uses Atom GraphQL through `ATOM_GRAPHQL_URL`.
 
@@ -28,7 +36,7 @@ The Atom Next UI contains the GraphQL playground and API Builder. It uses GraphQ
 
 Atom GraphQL is generic. No Magistrala-specific GraphQL aliases exist; use the generic application mappings below.
 
-GraphQL uses typed enums for Atom's fixed vocabularies, including `EntityKind`, `EntityStatus`, `TenantStatus`, `SubjectKind`, `GrantKind`, `ScopeKind`, `Effect`, `CredentialKind`, and `AuditOutcome`. Inline GraphQL uses enum values without quotes, such as `kind: device` or `scopeKind: object`. When using variables, send the same value as a JSON string, such as `"device"`.
+GraphQL uses typed enums for Atom's fixed vocabularies, including `EntityKind`, `EntityStatus`, `TenantStatus`, `Effect`, `CredentialKind`, and `AuditOutcome`. Inline GraphQL uses enum values without quotes, such as `kind: device`. When using variables, send the same value as a JSON string, such as `"device"`.
 
 For entity creation, frontends should send `profileId` when a profile is selected. Atom derives the internal `kind` from `profile.kind`; if `profileVersionId` is omitted, Atom uses the active/latest profile version. Authorization still uses `entities.kind`, not `profileId` or `profileVersionId`.
 
@@ -90,21 +98,6 @@ mutation {
 }
 
 mutation {
-  createPolicy(input: {
-    subjectKind: entity,
-    subjectId: "client-entity-id",
-    grantKind: capability,
-    grantId: "publish-capability-id",
-    scopeKind: object,
-    scopeRef: "channel-resource-id",
-    effect: allow
-  }) {
-    id
-    effect
-  }
-}
-
-mutation {
   authzCheck(input: {
     subjectId: "client-entity-id",
     action: "publish",
@@ -116,7 +109,7 @@ mutation {
 }
 ```
 
-Generic application mapping uses Atom operations directly: a domain-like app calls `createTenant`, a client-like app calls `createEntity` with a device/client profile, a channel-like app calls `createResource` with `kind="channel"`, and a connection-like app calls `createPolicy` over entity subjects and resource objects.
+Generic application mapping uses Atom operations directly: a domain-like app calls `createTenant`, a client-like app calls `createEntity` with a device/client profile, a channel-like app calls `createResource` with `kind="channel"`, a role-based app creates Permission Blocks and assigns Roles, and a strict runtime link creates a Direct Policy that references a Permission Block.
 
 ## Core design principles
 
@@ -124,9 +117,9 @@ Generic application mapping uses Atom operations directly: a domain-like app cal
 
 **Online authorization** — tokens carry no embedded permissions. Every authorization decision calls the PDP at runtime. This means policy changes take effect immediately, without token reissuance.
 
-**Deny by default** — an explicit `DENY` policy binding overrides any `ALLOW`. No matching allow policy means denied.
+**Deny by default** — a matching deny Permission Block overrides matching allows. No matching allow means denied.
 
-**Single binary** — one Go binary, one Postgres database. No sidecars, no service mesh required.
+**Single binary** — one Rust binary, one Postgres database. No sidecars, no service mesh required.
 
 ## Where to start
 

@@ -39,7 +39,7 @@ async fn require_credential_management(
     if has_capability_in_scope(
         &state.pool,
         actor_id,
-        "credential.manage",
+        "manage",
         Scope::Object(target_entity_id),
     )
     .await?
@@ -49,7 +49,7 @@ async fn require_credential_management(
     require_capability(
         &state.pool,
         actor_id,
-        "credential.manage",
+        "manage",
         scope_for_tenant(target.tenant_id),
     )
     .await?;
@@ -479,7 +479,18 @@ pub async fn revoke_credential(
     auth: AuthContext,
     Path((entity_id, cred_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
-    let tenant_id = require_credential_management(&state, auth.entity_id, entity_id).await?;
+    let tenant_id = if has_capability_in_scope(
+        &state.pool,
+        auth.entity_id,
+        "revoke",
+        Scope::Object(cred_id),
+    )
+    .await?
+    {
+        credential_tenant_id(&state.pool, entity_id, cred_id).await?
+    } else {
+        require_credential_management(&state, auth.entity_id, entity_id).await?
+    };
     service::revoke_credential(&state.pool, entity_id, cred_id).await?;
     audit::write(
         &state.pool,
@@ -491,6 +502,22 @@ pub async fn revoke_credential(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn credential_tenant_id(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
+    sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1 AND c.entity_id = $2",
+    )
+    .bind(credential_id)
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::not_found("credential not found"))
 }
 
 // ─── Groups ───────────────────────────────────────────────────────────────────

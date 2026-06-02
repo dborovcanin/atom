@@ -37,10 +37,7 @@ pub async fn create_tenant(
     require_any_capability(
         &state.pool,
         auth.entity_id,
-        &[
-            ("tenant.manage", Scope::Platform),
-            ("tenant.create", Scope::Platform),
-        ],
+        &[("manage", Scope::Platform), ("create", Scope::Platform)],
     )
     .await?;
     let tenant = repo::create_tenant(&state.pool, req, Some(auth.entity_id)).await?;
@@ -79,10 +76,7 @@ pub async fn update_tenant(
     require_any_capability(
         &state.pool,
         auth.entity_id,
-        &[
-            ("tenant.manage", Scope::Platform),
-            ("manage", Scope::Tenant(id)),
-        ],
+        &[("manage", Scope::Platform), ("manage", Scope::Tenant(id))],
     )
     .await?;
     let tenant = repo::update_tenant(&state.pool, id, req, Some(auth.entity_id)).await?;
@@ -94,13 +88,7 @@ pub async fn enable_tenant(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_capability(
-        &state.pool,
-        auth.entity_id,
-        "tenant.manage",
-        Scope::Platform,
-    )
-    .await?;
+    require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform).await?;
     let tenant =
         repo::change_tenant_status(&state.pool, id, TenantStatus::Active, Some(auth.entity_id))
             .await?;
@@ -112,13 +100,7 @@ pub async fn disable_tenant(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_capability(
-        &state.pool,
-        auth.entity_id,
-        "tenant.manage",
-        Scope::Platform,
-    )
-    .await?;
+    require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform).await?;
     let tenant = repo::change_tenant_status(
         &state.pool,
         id,
@@ -134,13 +116,7 @@ pub async fn freeze_tenant(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_capability(
-        &state.pool,
-        auth.entity_id,
-        "tenant.manage",
-        Scope::Platform,
-    )
-    .await?;
+    require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform).await?;
     let tenant =
         repo::change_tenant_status(&state.pool, id, TenantStatus::Frozen, Some(auth.entity_id))
             .await?;
@@ -152,13 +128,7 @@ pub async fn delete_tenant(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_capability(
-        &state.pool,
-        auth.entity_id,
-        "tenant.manage",
-        Scope::Platform,
-    )
-    .await?;
+    require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform).await?;
     repo::change_tenant_status(&state.pool, id, TenantStatus::Deleted, Some(auth.entity_id))
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -334,7 +304,7 @@ pub(crate) async fn send_invitation_email(
 }
 
 async fn can_list_all_tenants(pool: &sqlx::PgPool, entity_id: Uuid) -> Result<bool, AppError> {
-    for capability in ["list", "read", "manage"] {
+    for capability in ["read", "manage"] {
         if has_capability_in_scope(pool, entity_id, capability, Scope::Platform).await? {
             return Ok(true);
         }

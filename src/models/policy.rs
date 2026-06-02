@@ -22,6 +22,116 @@ pub struct PolicyBinding {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PermissionBlock {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub scope_mode: String,
+    pub object_kind: Option<String>,
+    pub object_type: Option<String>,
+    pub object_id: Option<Uuid>,
+    pub group_id: Option<Uuid>,
+    pub effect: Effect,
+    pub conditions: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePermissionBlock {
+    pub tenant_id: Option<Uuid>,
+    pub scope_mode: String,
+    pub object_kind: Option<String>,
+    pub object_type: Option<String>,
+    pub object_id: Option<Uuid>,
+    pub group_id: Option<Uuid>,
+    pub effect: Effect,
+    pub conditions: Value,
+    pub action_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListPermissionBlocks {
+    pub tenant_id: Option<Uuid>,
+    pub scope_mode: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PermissionBlockList {
+    pub items: Vec<PermissionBlock>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RoleAssignment {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub subject_kind: SubjectKind,
+    pub subject_id: Uuid,
+    pub role_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRoleAssignment {
+    pub tenant_id: Option<Uuid>,
+    pub subject_kind: SubjectKind,
+    pub subject_id: Uuid,
+    pub role_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListRoleAssignments {
+    pub tenant_id: Option<Uuid>,
+    pub subject_kind: Option<SubjectKind>,
+    pub subject_id: Option<Uuid>,
+    pub role_id: Option<Uuid>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoleAssignmentList {
+    pub items: Vec<RoleAssignment>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DirectPolicy {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub subject_kind: SubjectKind,
+    pub subject_id: Uuid,
+    pub permission_block_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateDirectPolicy {
+    pub tenant_id: Option<Uuid>,
+    pub subject_kind: SubjectKind,
+    pub subject_id: Uuid,
+    pub permission_block_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListDirectPolicies {
+    pub tenant_id: Option<Uuid>,
+    pub subject_kind: Option<SubjectKind>,
+    pub subject_id: Option<Uuid>,
+    pub permission_block_id: Option<Uuid>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DirectPolicyList {
+    pub items: Vec<DirectPolicy>,
+    pub total: i64,
+}
+
 /// Request to create a policy binding.
 ///
 /// Deserialization accepts the canonical post-M1 vocabulary

@@ -288,10 +288,17 @@ execute
 manage
 role.manage
 policy.manage
-credential.manage
-audit.read
-tenant.manage
+create
+revoke
+rotate
+authz.check
 ```
+
+Hybrid action naming:
+
+- stored protected objects use generic actions, for example `read` on `audit_log`, `manage` or `revoke` on `credential`, `create` or `manage` on `tenant`, and `rotate` on `signing_key`;
+- `role.manage` and `policy.manage` stay explicit because they mean scoped role/member administration for a client, channel, group, rule, report, alarm, or domain;
+- `authz.check` stays explicit because it is an operation, not an object.
 
 Do not expose old MG-style aliases in role management:
 

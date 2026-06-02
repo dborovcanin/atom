@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    auth::RequireManage,
+    auth::{require_capability, AuthContext, Scope},
     error::{db_err, AppError},
     state::AppState,
 };
@@ -246,11 +246,12 @@ pub async fn jwks(State(state): State<AppState>) -> impl IntoResponse {
     Json(keys.to_jwks())
 }
 
-/// POST /auth/keys/rotate — requires manage permission.
+/// POST /auth/keys/rotate — requires signing-key rotation permission.
 pub async fn rotate_keys(
     State(state): State<AppState>,
-    _auth: RequireManage,
+    auth: AuthContext,
 ) -> Result<impl IntoResponse, AppError> {
+    require_capability(&state.pool, auth.entity_id, "rotate", Scope::Platform).await?;
     let new_keys = rotate(&state.pool).await?;
     *state.keys.write().await = new_keys;
     Ok(StatusCode::NO_CONTENT)

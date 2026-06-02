@@ -1,7 +1,9 @@
 use async_graphql::{Context, Object, Result, ID};
+use uuid::Uuid;
 
 use crate::{
     audit,
+    auth::{has_capability_in_scope, Scope},
     identity::service,
     models::{enums::AuditOutcome, token as token_model},
     state::AppState,
@@ -108,7 +110,19 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let credential_id = parse_id(credential_id, "credentialId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = if has_capability_in_scope(
+            &state.pool,
+            auth.entity_id,
+            "revoke",
+            Scope::Object(credential_id),
+        )
+        .await
+        .map_err(gql_error)?
+        {
+            credential_tenant_id(&state.pool, entity_id, credential_id).await?
+        } else {
+            require_credential_management(state, auth.entity_id, entity_id).await?
+        };
         service::revoke_credential(&state.pool, entity_id, credential_id)
             .await
             .map_err(gql_error)?;
@@ -123,4 +137,22 @@ impl CredentialMutation {
         .await;
         Ok(true)
     }
+}
+
+async fn credential_tenant_id(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Option<Uuid>> {
+    let tenant_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1 AND c.entity_id = $2",
+    )
+    .bind(credential_id)
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(crate::error::AppError::Database)
+    .map_err(gql_error)?
+    .ok_or_else(|| async_graphql::Error::new("credential not found"))?;
+    Ok(tenant_id)
 }

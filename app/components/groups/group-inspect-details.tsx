@@ -113,7 +113,7 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
         </span>
       </Field>
 
-      <Field label="Child groups">
+      <Field label="Child Object Groups">
         {hierarchyQuery.data?.childGroups.items.length ? (
           <div className="flex flex-wrap gap-1">
             {hierarchyQuery.data.childGroups.items.map((child) => (
@@ -129,7 +129,9 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
           <span className="text-sm text-muted-foreground">No child groups</span>
         )}
         <p className="mt-2 text-xs text-muted-foreground">
-          Policies assigned to this group apply to members of its child groups.
+          Object Group nesting only defines where a role applies. Access is
+          still granted through role assignments to entities or Principal
+          Groups.
         </p>
       </Field>
 

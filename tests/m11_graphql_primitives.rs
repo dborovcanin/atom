@@ -174,6 +174,7 @@ async fn create_list_and_get_tenant() {
     let pool = common::pool().await;
     let schema = build_schema(state(pool.clone()).await);
     let name = format!("graphql-tenant-{}", Uuid::new_v4());
+    let route = format!("graphql-route-{}", Uuid::new_v4());
 
     let created = schema
         .execute(authed(format!(
@@ -181,7 +182,7 @@ async fn create_list_and_get_tenant() {
             mutation {{
               createTenant(input: {{
                 name: "{name}",
-                route: "graphql-route",
+                route: "{route}",
                 tags: ["graphql"],
                 attributes: {{ source: "graphql" }}
               }}) {{

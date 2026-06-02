@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -10,22 +10,31 @@ use crate::{
     models::{
         access::{
             AccessItem, AccessQuery, AdminPageQuery, AuditLogItem, AuditLogResponse,
-            CapabilitySource, CapabilitySummary, EffectiveCapabilitiesQuery,
-            EffectiveCapabilitiesResponse, EffectiveCapability, EntityAccessResponse,
-            EntitySummary, ExpiringCredentialItem, ExpiringCredentialsQuery,
-            ExpiringCredentialsResponse, GrantSummary, GroupAccessItem, GroupAccessQuery,
-            GroupAccessResponse, GroupInfo, OrphanPoliciesResponse, OrphanPolicyItem,
-            ResourceAccessEntity, ResourceAccessItem, ResourceAccessQuery, ResourceAccessResponse,
-            ResourceSummary, RoleHolderGroup, RoleHolderItem, RoleHoldersQuery,
-            RoleHoldersResponse, RoleSummary, RoleWithCapabilities, SubjectRoleAssignment,
-            SubjectRoleAssignmentList, SubjectRoleAssignmentsQuery, UnprotectedResourceItem,
-            UnprotectedResourcesQuery, UnprotectedResourcesResponse,
+            AuthorizedObjectIdsQuery, AuthorizedObjectIdsResponse, CapabilitySource,
+            CapabilitySummary, EffectiveCapabilitiesQuery, EffectiveCapabilitiesResponse,
+            EffectiveCapability, EntityAccessResponse, EntitySummary, ExpiringCredentialItem,
+            ExpiringCredentialsQuery, ExpiringCredentialsResponse, GrantSummary, GroupAccessItem,
+            GroupAccessQuery, GroupAccessResponse, GroupInfo, OrphanPoliciesResponse,
+            OrphanPolicyItem, ResourceAccessEntity, ResourceAccessItem, ResourceAccessQuery,
+            ResourceAccessResponse, ResourceSummary, RoleHolderGroup, RoleHolderItem,
+            RoleHoldersQuery, RoleHoldersResponse, RoleSummary, RoleWithCapabilities,
+            SubjectRoleAssignment, SubjectRoleAssignmentList, SubjectRoleAssignmentsQuery,
+            UnprotectedResourceItem, UnprotectedResourcesQuery, UnprotectedResourcesResponse,
         },
-        capability::{Capability, CreateCapability, ListCapabilities},
+        capability::{
+            Capability, CapabilityApplicability, CapabilityApplicabilityEntry,
+            CapabilityApplicabilityInput, CapabilityApplicabilityList, CreateCapability,
+            ListCapabilities,
+        },
         entity::Entity,
         enums::{CredentialKind, Effect, GrantKind, ScopeKind, SubjectKind},
         group::Group,
-        policy::{CreatePolicyBinding, ListPolicies, PolicyBinding, PolicyList},
+        policy::{
+            CreateDirectPolicy, CreatePermissionBlock, CreatePolicyBinding, CreateRoleAssignment,
+            DirectPolicy, DirectPolicyList, ListDirectPolicies, ListPermissionBlocks, ListPolicies,
+            ListRoleAssignments, PermissionBlock, PermissionBlockList, PolicyBinding, PolicyList,
+            RoleAssignment, RoleAssignmentList,
+        },
         resource::{CreateResource, ListResources, Resource, ResourceList, UpdateResource},
         role::{
             CreateRole, CreateRolePermissionBlock, ListRoles, Role, RoleDerivedKind, RoleList,
@@ -77,6 +86,23 @@ pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError>
         sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
         other => AppError::Database(other),
     })
+}
+
+pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Resource>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, Resource>(
+        r#"SELECT id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at
+           FROM resources
+           WHERE id = ANY($1::uuid[])
+           ORDER BY array_position($1::uuid[], id)"#,
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
 pub async fn list_resources(
@@ -245,7 +271,7 @@ async fn set_resource_parent_group_in_tx(
     let row = sqlx::query(
         r#"SELECT r.tenant_id AS resource_tenant_id, g.tenant_id AS group_tenant_id
            FROM resources r
-           CROSS JOIN groups g
+           CROSS JOIN object_groups g
            WHERE r.id = $1 AND g.id = $2"#,
     )
     .bind(resource_id)
@@ -267,7 +293,7 @@ async fn set_resource_parent_group_in_tx(
         ));
     }
     sqlx::query(
-        r#"INSERT INTO group_resource_parents (group_id, resource_id, tenant_id)
+        r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
            VALUES ($1, $2, $3)
            ON CONFLICT (resource_id) DO UPDATE
            SET group_id = EXCLUDED.group_id,
@@ -287,7 +313,7 @@ async fn clear_resource_parent_group_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM group_resource_parents WHERE resource_id = $1")
+    sqlx::query("DELETE FROM object_group_resources WHERE resource_id = $1")
         .bind(resource_id)
         .execute(&mut **tx)
         .await
@@ -328,35 +354,15 @@ pub struct ExpandedRoleGrant {
 
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
-    let scope_kind = req.scope_kind.unwrap_or_else(|| {
-        if req.tenant_id.is_some() {
-            "tenant".to_string()
-        } else {
-            "platform".to_string()
-        }
-    });
-    let scope_ref = req
-        .scope_ref
-        .or_else(|| req.tenant_id.map(|tenant_id| tenant_id.to_string()));
-    let parsed_scope_kind = parse_scope_kind_text(&scope_kind)?;
-    validate_role_scope(
-        pool,
-        req.tenant_id,
-        &parsed_scope_kind,
-        scope_ref.as_deref(),
-    )
-    .await?;
     sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description, scope_kind, scope_ref)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .bind(scope_kind)
-    .bind(scope_ref)
     .fetch_one(pool)
     .await
     .map_err(db_err)
@@ -376,22 +382,24 @@ pub async fn create_role_with_assignments(
     }
 
     let id = Uuid::new_v4();
-    let scope_kind = req.scope_kind.unwrap_or_else(|| {
-        if req.tenant_id.is_some() {
-            "tenant".to_string()
-        } else {
-            "platform".to_string()
-        }
-    });
-    let scope_ref = req
-        .scope_ref
-        .or_else(|| req.tenant_id.map(|tenant_id| tenant_id.to_string()));
-    let parsed_scope_kind = parse_scope_kind_text(&scope_kind)?;
+    let parsed_scope_kind = if req.tenant_id.is_some() {
+        ScopeKind::Tenant
+    } else {
+        ScopeKind::Platform
+    };
+    let scope_ref = req.tenant_id.map(|tenant_id| tenant_id.to_string());
     validate_role_scope(
         pool,
         req.tenant_id,
         &parsed_scope_kind,
         scope_ref.as_deref(),
+    )
+    .await?;
+    validate_capabilities_against_role_scope(
+        pool,
+        &parsed_scope_kind,
+        scope_ref.as_deref(),
+        capability_ids,
     )
     .await?;
 
@@ -419,53 +427,43 @@ pub async fn create_role_with_assignments(
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let role = sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description, scope_kind, scope_ref)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .bind(&scope_kind)
-    .bind(&scope_ref)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
 
     for capability_id in capability_ids {
-        sqlx::query(
-            "INSERT INTO role_capabilities (role_id, capability_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        insert_role_capability_as_permission_block(
+            &mut tx,
+            role.id,
+            req.tenant_id,
+            &parsed_scope_kind,
+            scope_ref.as_deref(),
+            *capability_id,
         )
-        .bind(role.id)
-        .bind(capability_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        .await?;
     }
 
     for child_role_id in child_role_ids {
-        sqlx::query(
-            "INSERT INTO role_composites (parent_role_id, child_role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(role.id)
-        .bind(child_role_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        copy_role_permission_blocks(&mut tx, role.id, *child_role_id).await?;
     }
 
     for member_id in member_entity_ids {
         sqlx::query(
-            r#"INSERT INTO policy_bindings
-                 (tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
-               VALUES ($1, 'entity', $2, 'role', $3, $4, $5, 'allow', '{}'::jsonb)"#,
+            r#"INSERT INTO role_assignments
+                 (tenant_id, subject_kind, subject_id, role_id)
+               VALUES ($1, 'entity', $2, $3)"#,
         )
         .bind(req.tenant_id)
         .bind(member_id)
         .bind(role.id)
-        .bind(&parsed_scope_kind)
-        .bind(&scope_ref)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -504,39 +502,18 @@ pub async fn create_role_with_permission_blocks(
         return Err(AppError::bad_request("role permission blocks are required"));
     }
     validate_role_permission_blocks(pool, permission_blocks).await?;
-    let scope_kind = req.scope_kind.unwrap_or_else(|| {
-        if req.tenant_id.is_some() {
-            "tenant".to_string()
-        } else {
-            "platform".to_string()
-        }
-    });
-    let scope_ref = req
-        .scope_ref
-        .or_else(|| req.tenant_id.map(|tenant_id| tenant_id.to_string()));
-    let parsed_scope_kind = parse_scope_kind_text(&scope_kind)?;
-    validate_role_scope(
-        pool,
-        req.tenant_id,
-        &parsed_scope_kind,
-        scope_ref.as_deref(),
-    )
-    .await?;
-
     ensure_entities_exist(pool, member_entity_ids).await?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let role = sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description, scope_kind, scope_ref)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .bind(&scope_kind)
-    .bind(&scope_ref)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -547,15 +524,13 @@ pub async fn create_role_with_permission_blocks(
 
     for member_id in member_entity_ids {
         sqlx::query(
-            r#"INSERT INTO policy_bindings
-                 (tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
-               VALUES ($1, 'entity', $2, 'role', $3, $4, $5, 'allow', '{}'::jsonb)"#,
+            r#"INSERT INTO role_assignments
+                 (tenant_id, subject_kind, subject_id, role_id)
+               VALUES ($1, 'entity', $2, $3)"#,
         )
         .bind(req.tenant_id)
         .bind(member_id)
         .bind(role.id)
-        .bind(&parsed_scope_kind)
-        .bind(&scope_ref)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -595,20 +570,15 @@ pub async fn replace_role_permission_blocks(
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     sqlx::query(
-        r#"DELETE FROM role_permission_actions
-           WHERE block_id IN (
-             SELECT id FROM role_permission_blocks WHERE role_id = $1
+        r#"DELETE FROM permission_blocks
+           WHERE id IN (
+             SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1
            )"#,
     )
     .bind(role_id)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
-    sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
-        .bind(role_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
     for block in permission_blocks {
         insert_role_permission_block(&mut tx, role_id, block).await?;
     }
@@ -616,31 +586,91 @@ pub async fn replace_role_permission_blocks(
     Ok(())
 }
 
+pub async fn replace_role_permission_block_links(
+    pool: &PgPool,
+    role_id: Uuid,
+    permission_block_ids: &[Uuid],
+) -> Result<(), AppError> {
+    let role_tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+            .bind(role_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))?;
+
+    let mut unique_block_ids = permission_block_ids.to_vec();
+    unique_block_ids.sort_unstable();
+    unique_block_ids.dedup();
+
+    if !unique_block_ids.is_empty() {
+        let count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM permission_blocks
+               WHERE id = ANY($1::uuid[])
+                 AND tenant_id IS NOT DISTINCT FROM $2"#,
+        )
+        .bind(&unique_block_ids)
+        .bind(role_tenant_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+        if count != unique_block_ids.len() as i64 {
+            return Err(AppError::bad_request(
+                "role permission blocks must exist and belong to the same tenant as the role",
+            ));
+        }
+    }
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
+        .bind(role_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+    for permission_block_id in unique_block_ids {
+        sqlx::query(
+            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+               VALUES ($1, $2)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(role_id)
+        .bind(permission_block_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    tx.commit().await.map_err(db_err)
+}
+
 async fn insert_role_permission_block(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     role_id: Uuid,
     block: &CreateRolePermissionBlock,
 ) -> Result<Uuid, AppError> {
+    let (scope_mode, tenant_id, object_kind, object_type, object_id, group_id) =
+        permission_block_scope_columns(block);
     let block_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO role_permission_blocks
-             (role_id, applies_to, object_id, object_kind, object_type, tenant_id, group_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+        r#"INSERT INTO permission_blocks
+             (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect, conditions)
+           VALUES ($1, $2, $3, $4, $5, $6, 'allow', '{}'::jsonb)
            RETURNING id"#,
     )
-    .bind(role_id)
-    .bind(&block.applies_to)
-    .bind(block.object_id)
-    .bind(&block.object_kind)
-    .bind(&block.object_type)
-    .bind(block.tenant_id)
-    .bind(block.group_id)
+    .bind(scope_mode)
+    .bind(tenant_id)
+    .bind(object_kind)
+    .bind(object_type)
+    .bind(object_id)
+    .bind(group_id)
     .fetch_one(&mut **tx)
     .await
     .map_err(db_err)?;
 
     for capability_id in &block.capability_ids {
         sqlx::query(
-            r#"INSERT INTO role_permission_actions (block_id, capability_id)
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                VALUES ($1, $2)
                ON CONFLICT DO NOTHING"#,
         )
@@ -651,7 +681,309 @@ async fn insert_role_permission_block(
         .map_err(db_err)?;
     }
 
+    sqlx::query(
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING"#,
+    )
+    .bind(role_id)
+    .bind(block_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
     Ok(block_id)
+}
+
+type PermissionBlockScopeColumns<'a> = (
+    &'a str,
+    Option<Uuid>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<Uuid>,
+    Option<Uuid>,
+);
+
+fn permission_block_scope_columns(
+    block: &CreateRolePermissionBlock,
+) -> PermissionBlockScopeColumns<'_> {
+    match block.applies_to.as_str() {
+        "platform" => ("platform", None, None, None, None, None),
+        "tenant" => ("tenant", block.tenant_id, None, None, None, None),
+        "object" => (
+            "object",
+            block.tenant_id,
+            block.object_kind.as_deref(),
+            block.object_type.as_deref(),
+            block.object_id,
+            None,
+        ),
+        "object_kind" => (
+            "object_kind",
+            block.tenant_id,
+            block.object_kind.as_deref(),
+            None,
+            None,
+            None,
+        ),
+        "object_type" => (
+            "object_type",
+            block.tenant_id,
+            block.object_kind.as_deref(),
+            block.object_type.as_deref(),
+            None,
+            None,
+        ),
+        "object_group_type" => (
+            "group_direct_objects",
+            block.tenant_id,
+            block.object_kind.as_deref(),
+            block.object_type.as_deref(),
+            None,
+            block.group_id,
+        ),
+        "object_group_tree_type" => (
+            "group_descendant_objects",
+            block.tenant_id,
+            block.object_kind.as_deref(),
+            block.object_type.as_deref(),
+            None,
+            block.group_id,
+        ),
+        "object_group_child_kind" => (
+            "group_child_groups",
+            block.tenant_id,
+            None,
+            None,
+            None,
+            block.group_id,
+        ),
+        "object_group_descendant_kind" => (
+            "group_descendant_groups",
+            block.tenant_id,
+            None,
+            None,
+            None,
+            block.group_id,
+        ),
+        _ => ("platform", None, None, None, None, None),
+    }
+}
+
+async fn insert_role_capability_as_permission_block(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    role_id: Uuid,
+    tenant_id: Option<Uuid>,
+    scope_kind: &ScopeKind,
+    scope_ref: Option<&str>,
+    capability_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let block = permission_block_from_legacy_scope(tenant_id, scope_kind, scope_ref)?;
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks
+             (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect, conditions)
+           VALUES ($1, $2, $3, $4, $5, $6, 'allow', '{}'::jsonb)
+           RETURNING id"#,
+    )
+    .bind(block.scope_mode)
+    .bind(block.tenant_id)
+    .bind(block.object_kind)
+    .bind(block.object_type)
+    .bind(block.object_id)
+    .bind(block.group_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+           VALUES ($1, $2)"#,
+    )
+    .bind(block_id)
+    .bind(capability_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+           VALUES ($1, $2)"#,
+    )
+    .bind(role_id)
+    .bind(block_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(block_id)
+}
+
+async fn copy_role_permission_blocks(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    target_role_id: Uuid,
+    source_role_id: Uuid,
+) -> Result<(), AppError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        r#"SELECT pb.id, pb.tenant_id, pb.scope_mode, pb.object_kind, pb.object_type,
+                  pb.object_id, pb.group_id, pb.effect, pb.conditions
+           FROM role_permission_blocks rpb
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           WHERE rpb.role_id = $1"#,
+    )
+    .bind(source_role_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    for row in rows {
+        let source_block_id: Uuid = row.try_get("id").map_err(db_err)?;
+        let copied_block_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO permission_blocks
+                 (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING id"#,
+        )
+        .bind(row.try_get::<Option<Uuid>, _>("tenant_id").map_err(db_err)?)
+        .bind(row.try_get::<String, _>("scope_mode").map_err(db_err)?)
+        .bind(row.try_get::<Option<String>, _>("object_kind").map_err(db_err)?)
+        .bind(row.try_get::<Option<String>, _>("object_type").map_err(db_err)?)
+        .bind(row.try_get::<Option<Uuid>, _>("object_id").map_err(db_err)?)
+        .bind(row.try_get::<Option<Uuid>, _>("group_id").map_err(db_err)?)
+        .bind(row.try_get::<String, _>("effect").map_err(db_err)?)
+        .bind(row.try_get::<Value, _>("conditions").map_err(db_err)?)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+               SELECT $1, action_id
+               FROM permission_block_actions
+               WHERE permission_block_id = $2"#,
+        )
+        .bind(copied_block_id)
+        .bind(source_block_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+               VALUES ($1, $2)"#,
+        )
+        .bind(target_role_id)
+        .bind(copied_block_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    Ok(())
+}
+
+struct PermissionBlockInsert {
+    scope_mode: &'static str,
+    tenant_id: Option<Uuid>,
+    object_kind: Option<String>,
+    object_type: Option<String>,
+    object_id: Option<Uuid>,
+    group_id: Option<Uuid>,
+}
+
+fn permission_block_from_legacy_scope(
+    tenant_id: Option<Uuid>,
+    scope_kind: &ScopeKind,
+    scope_ref: Option<&str>,
+) -> Result<PermissionBlockInsert, AppError> {
+    let parse_group_id = |raw: Option<&str>| -> Result<Uuid, AppError> {
+        raw.and_then(|value| value.split_once(':').map(|(id, _)| id).or(Some(value)))
+            .ok_or_else(|| AppError::bad_request("group scope requires scope_ref"))?
+            .parse::<Uuid>()
+            .map_err(|_| AppError::bad_request("group scope_ref has invalid group UUID"))
+    };
+
+    match scope_kind {
+        ScopeKind::Platform => Ok(PermissionBlockInsert {
+            scope_mode: "platform",
+            tenant_id: None,
+            object_kind: None,
+            object_type: None,
+            object_id: None,
+            group_id: None,
+        }),
+        ScopeKind::Tenant => Ok(PermissionBlockInsert {
+            scope_mode: "tenant",
+            tenant_id,
+            object_kind: None,
+            object_type: None,
+            object_id: None,
+            group_id: None,
+        }),
+        ScopeKind::ObjectKind => Ok(PermissionBlockInsert {
+            scope_mode: "object_kind",
+            tenant_id,
+            object_kind: scope_ref.map(ToOwned::to_owned),
+            object_type: None,
+            object_id: None,
+            group_id: None,
+        }),
+        ScopeKind::ObjectType => {
+            let raw = scope_ref
+                .ok_or_else(|| AppError::bad_request("object_type scope requires scope_ref"))?;
+            let (object_kind, _) = raw
+                .split_once(':')
+                .ok_or_else(|| AppError::bad_request("object_type scope_ref must be namespaced"))?;
+            Ok(PermissionBlockInsert {
+                scope_mode: "object_type",
+                tenant_id,
+                object_kind: Some(object_kind.to_string()),
+                object_type: Some(raw.to_string()),
+                object_id: None,
+                group_id: None,
+            })
+        }
+        ScopeKind::Object => Ok(PermissionBlockInsert {
+            scope_mode: "object",
+            tenant_id,
+            object_kind: None,
+            object_type: None,
+            object_id: scope_ref.and_then(|raw| raw.parse::<Uuid>().ok()),
+            group_id: None,
+        }),
+        ScopeKind::GroupObjectType | ScopeKind::GroupTreeObjectType => {
+            let raw = scope_ref
+                .ok_or_else(|| AppError::bad_request("group object scope requires scope_ref"))?;
+            let (group_id, object_type) = raw.split_once(':').ok_or_else(|| {
+                AppError::bad_request("group object scope_ref must include object type")
+            })?;
+            let (object_kind, _) = object_type.split_once(':').ok_or_else(|| {
+                AppError::bad_request("group object scope_ref object type must be namespaced")
+            })?;
+            Ok(PermissionBlockInsert {
+                scope_mode: if matches!(scope_kind, ScopeKind::GroupObjectType) {
+                    "group_direct_objects"
+                } else {
+                    "group_descendant_objects"
+                },
+                tenant_id,
+                object_kind: Some(object_kind.to_string()),
+                object_type: Some(object_type.to_string()),
+                object_id: None,
+                group_id: Some(group_id.parse::<Uuid>().map_err(|_| {
+                    AppError::bad_request("group scope_ref has invalid group UUID")
+                })?),
+            })
+        }
+        ScopeKind::GroupChildKind | ScopeKind::GroupDescendantKind => Ok(PermissionBlockInsert {
+            scope_mode: if matches!(scope_kind, ScopeKind::GroupChildKind) {
+                "group_child_groups"
+            } else {
+                "group_descendant_groups"
+            },
+            tenant_id,
+            object_kind: None,
+            object_type: None,
+            object_id: None,
+            group_id: Some(parse_group_id(scope_ref)?),
+        }),
+    }
 }
 
 async fn validate_role_permission_blocks(
@@ -660,51 +992,8 @@ async fn validate_role_permission_blocks(
 ) -> Result<(), AppError> {
     for block in blocks {
         validate_permission_block_shape(block)?;
-        let target = permission_block_target(block);
-        for capability_id in &block.capability_ids {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM capabilities WHERE id = $1)")
-                    .bind(capability_id)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(db_err)?;
-            if !exists {
-                return Err(AppError::bad_request(format!(
-                    "capability {capability_id} does not exist"
-                )));
-            }
-
-            if let Some((object_kind, object_type)) = &target {
-                let applicable: bool = sqlx::query_scalar(
-                    r#"SELECT EXISTS (
-                         SELECT 1
-                         FROM capability_applicability
-                         WHERE capability_id = $1
-                           AND object_kind = $2
-                           AND (
-                             $3::text IS NULL
-                             OR object_type IS NULL
-                             OR object_type = $3
-                           )
-                       )"#,
-                )
-                .bind(capability_id)
-                .bind(object_kind)
-                .bind(object_type)
-                .fetch_one(pool)
-                .await
-                .map_err(db_err)?;
-                if !applicable {
-                    return Err(AppError::bad_request(format!(
-                        "capability {capability_id} is not applicable to {object_kind}{}",
-                        object_type
-                            .as_deref()
-                            .map(|value| format!(":{value}"))
-                            .unwrap_or_default()
-                    )));
-                }
-            }
-        }
+        let target = permission_block_target(pool, block).await?;
+        validate_capabilities_against_target(pool, &block.capability_ids, target).await?;
     }
     Ok(())
 }
@@ -756,22 +1045,46 @@ fn validate_permission_block_shape(block: &CreateRolePermissionBlock) -> Result<
     }
 }
 
-fn permission_block_target(block: &CreateRolePermissionBlock) -> Option<(String, Option<String>)> {
+async fn permission_block_target(
+    pool: &PgPool,
+    block: &CreateRolePermissionBlock,
+) -> Result<Option<CapabilityValidationTarget>, AppError> {
     match block.applies_to.as_str() {
-        "tenant" => None,
-        "object" | "object_kind" => block
-            .object_kind
-            .as_ref()
-            .map(|object_kind| (object_kind.clone(), block.object_type.clone())),
-        "object_type" | "object_group_type" | "object_group_tree_type" => block
-            .object_kind
-            .as_ref()
-            .map(|object_kind| (object_kind.clone(), block.object_type.clone())),
-        "object_group_child_kind" | "object_group_descendant_kind" => {
-            Some(("group".to_string(), None))
+        "tenant" | "platform" => Ok(None),
+        "object" => match block.object_id {
+            Some(object_id) => resolve_exact_object_target(pool, object_id)
+                .await?
+                .map(Some)
+                .ok_or_else(|| {
+                    AppError::bad_request("object permission block references unknown object")
+                }),
+            None => Err(AppError::bad_request(
+                "object permission block requires objectId",
+            )),
+        },
+        "object_kind" => {
+            Ok(block
+                .object_kind
+                .as_ref()
+                .map(|object_kind| CapabilityValidationTarget {
+                    object_kind: object_kind.clone(),
+                    object_type: None,
+                }))
         }
-        "platform" => None,
-        _ => None,
+        "object_type" | "object_group_type" | "object_group_tree_type" => Ok(block
+            .object_kind
+            .as_ref()
+            .map(|object_kind| CapabilityValidationTarget {
+                object_kind: object_kind.clone(),
+                object_type: block.object_type.clone(),
+            })),
+        "object_group_child_kind" | "object_group_descendant_kind" => {
+            Ok(Some(CapabilityValidationTarget {
+                object_kind: "group".to_string(),
+                object_type: None,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -780,10 +1093,53 @@ pub async fn list_role_permission_blocks(
     role_id: Uuid,
 ) -> Result<Vec<RolePermissionBlock>, AppError> {
     sqlx::query_as::<_, RolePermissionBlock>(
-        r#"SELECT id, role_id, applies_to, object_id, object_kind, object_type, tenant_id, group_id, created_at, updated_at
-           FROM role_permission_blocks
-           WHERE role_id = $1
-           ORDER BY created_at, id"#,
+        r#"SELECT pb.id,
+                  rpb.role_id,
+                  CASE
+                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'object_group_type'
+                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'object_group_tree_type'
+                    WHEN pb.scope_mode = 'group_child_groups' THEN 'object_group_child_kind'
+                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'object_group_descendant_kind'
+                    ELSE pb.scope_mode
+                  END AS applies_to,
+                  pb.object_id,
+                  pb.object_kind,
+                  pb.object_type,
+                  pb.tenant_id,
+                  pb.group_id,
+                  pb.created_at,
+                  pb.updated_at
+           FROM role_permission_blocks rpb
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           WHERE rpb.role_id = $1
+           ORDER BY pb.created_at, pb.id"#,
+    )
+    .bind(role_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn list_permission_blocks_for_role(
+    pool: &PgPool,
+    role_id: Uuid,
+) -> Result<Vec<PermissionBlock>, AppError> {
+    sqlx::query_as::<_, PermissionBlock>(
+        r#"SELECT pb.id,
+                  pb.tenant_id,
+                  pb.scope_mode,
+                  pb.object_kind,
+                  pb.object_type,
+                  pb.object_id,
+                  pb.group_id,
+                  pb.effect,
+                  pb.conditions,
+                  pb.created_at,
+                  pb.updated_at
+           FROM role_permission_blocks rpb
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           WHERE rpb.role_id = $1
+           ORDER BY pb.created_at, pb.id"#,
     )
     .bind(role_id)
     .fetch_all(pool)
@@ -796,10 +1152,10 @@ pub async fn role_permission_block_capabilities(
     block_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
     sqlx::query_as::<_, Capability>(
-        r#"SELECT c.id, c.name, c.resource_kind, c.description, c.created_at, c.updated_at
-           FROM capabilities c
-           JOIN role_permission_actions rpa ON rpa.capability_id = c.id
-           WHERE rpa.block_id = $1
+        r#"SELECT c.id, c.name, c.description, c.created_at, c.updated_at
+           FROM actions c
+           JOIN permission_block_actions pba ON pba.action_id = c.id
+           WHERE pba.permission_block_id = $1
            ORDER BY c.name"#,
     )
     .bind(block_id)
@@ -808,9 +1164,248 @@ pub async fn role_permission_block_capabilities(
     .map_err(db_err)
 }
 
+pub async fn permission_block_capabilities(
+    pool: &PgPool,
+    block_id: Uuid,
+) -> Result<Vec<Capability>, AppError> {
+    role_permission_block_capabilities(pool, block_id).await
+}
+
+pub async fn get_permission_block(pool: &PgPool, id: Uuid) -> Result<PermissionBlock, AppError> {
+    sqlx::query_as::<_, PermissionBlock>(
+        r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
+                  effect, conditions, created_at, updated_at
+           FROM permission_blocks
+           WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("permission block {id} not found")),
+        other => AppError::Database(other),
+    })
+}
+
+pub async fn list_permission_blocks(
+    pool: &PgPool,
+    params: ListPermissionBlocks,
+) -> Result<PermissionBlockList, AppError> {
+    let limit = params.limit.clamp(1, 100);
+    let offset = params.offset.max(0);
+    let items = sqlx::query_as::<_, PermissionBlock>(
+        r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
+                  effect, conditions, created_at, updated_at
+           FROM permission_blocks
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR scope_mode = $2)
+           ORDER BY created_at DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.scope_mode.clone())
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let total = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM permission_blocks
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR scope_mode = $2)"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.scope_mode)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(PermissionBlockList { items, total })
+}
+
+pub async fn create_permission_block(
+    pool: &PgPool,
+    req: CreatePermissionBlock,
+) -> Result<PermissionBlock, AppError> {
+    validate_permission_block_input(pool, &req).await?;
+    let conditions = if req.conditions.is_null() {
+        serde_json::json!({})
+    } else {
+        req.conditions
+    };
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks
+             (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id"#,
+    )
+    .bind(req.tenant_id)
+    .bind(&req.scope_mode)
+    .bind(req.object_kind.as_deref())
+    .bind(req.object_type.as_deref())
+    .bind(req.object_id)
+    .bind(req.group_id)
+    .bind(req.effect)
+    .bind(conditions)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    for action_id in req.action_ids {
+        sqlx::query(
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+               VALUES ($1, $2)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(id)
+        .bind(action_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    get_permission_block(pool, id).await
+}
+
+pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found(format!(
+            "permission block {id} not found"
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_permission_block_input(
+    pool: &PgPool,
+    req: &CreatePermissionBlock,
+) -> Result<(), AppError> {
+    if req.action_ids.is_empty() {
+        return Err(AppError::bad_request(
+            "permission block requires at least one action",
+        ));
+    }
+    let target = permission_block_input_target(pool, req).await?;
+    validate_capabilities_against_target(pool, &req.action_ids, target).await
+}
+
+async fn permission_block_input_target(
+    pool: &PgPool,
+    req: &CreatePermissionBlock,
+) -> Result<Option<CapabilityValidationTarget>, AppError> {
+    match req.scope_mode.as_str() {
+        "platform" => {
+            if req.tenant_id.is_some()
+                || req.object_kind.is_some()
+                || req.object_type.is_some()
+                || req.object_id.is_some()
+                || req.group_id.is_some()
+            {
+                return Err(AppError::bad_request(
+                    "platform permission block cannot include tenant or object fields",
+                ));
+            }
+            Ok(None)
+        }
+        "tenant" => req
+            .tenant_id
+            .map(|_| None)
+            .ok_or_else(|| AppError::bad_request("tenant permission block requires tenantId")),
+        "object_kind" => {
+            let object_kind = req.object_kind.clone().ok_or_else(|| {
+                AppError::bad_request("object_kind permission block requires objectKind")
+            })?;
+            Ok(Some(CapabilityValidationTarget {
+                object_kind,
+                object_type: None,
+            }))
+        }
+        "object_type" => match (&req.object_kind, &req.object_type) {
+            (Some(object_kind), Some(object_type)) => Ok(Some(CapabilityValidationTarget {
+                object_kind: object_kind.clone(),
+                object_type: Some(object_type.clone()),
+            })),
+            _ => Err(AppError::bad_request(
+                "object_type permission block requires objectKind and objectType",
+            )),
+        },
+        "object" => {
+            let object_id = req.object_id.ok_or_else(|| {
+                AppError::bad_request("object permission block requires objectId")
+            })?;
+            resolve_exact_object_target(pool, object_id)
+                .await?
+                .map(Some)
+                .ok_or_else(|| {
+                    AppError::bad_request("object permission block references unknown object")
+                })
+        }
+        "group" => {
+            validate_object_group_boundary(pool, req.tenant_id, req.group_id).await?;
+            Ok(Some(CapabilityValidationTarget {
+                object_kind: "group".to_string(),
+                object_type: None,
+            }))
+        }
+        "group_direct_objects" | "group_descendant_objects" => {
+            validate_object_group_boundary(pool, req.tenant_id, req.group_id).await?;
+            match (&req.object_kind, &req.object_type) {
+                (Some(object_kind), Some(object_type)) => Ok(Some(CapabilityValidationTarget {
+                    object_kind: object_kind.clone(),
+                    object_type: Some(object_type.clone()),
+                })),
+                _ => Err(AppError::bad_request(
+                    "object group object permission block requires objectKind and objectType",
+                )),
+            }
+        }
+        "group_child_groups" | "group_descendant_groups" => {
+            validate_object_group_boundary(pool, req.tenant_id, req.group_id).await?;
+            Ok(Some(CapabilityValidationTarget {
+                object_kind: "group".to_string(),
+                object_type: None,
+            }))
+        }
+        other => Err(AppError::bad_request(format!(
+            "unsupported permission block scopeMode '{other}'"
+        ))),
+    }
+}
+
+async fn validate_object_group_boundary(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    group_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let group_id =
+        group_id.ok_or_else(|| AppError::bad_request("object group scope requires groupId"))?;
+    let group_tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM object_groups WHERE id = $1")
+            .bind(group_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::bad_request("object group scope references unknown group"))?;
+    if tenant_id.is_some() && group_tenant_id != tenant_id {
+        return Err(AppError::bad_request(
+            "object group scope must reference a group in the same tenant",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
-        "SELECT id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at FROM roles WHERE id = $1",
+        r#"SELECT id, name, tenant_id, description, created_at, updated_at
+           FROM roles WHERE id = $1"#,
     )
     .bind(id)
     .fetch_one(pool)
@@ -844,32 +1439,23 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     }
 
     let items = sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at FROM roles
+        r#"SELECT id, name, tenant_id, description, created_at, updated_at
+           FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR scope_kind = $2)
-             AND ($3::text IS NULL OR scope_ref = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR description ILIKE $4)
+             AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
              AND (
-               $5::text IS NULL
-               OR ($5 = 'simple' AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = roles.id
-                  ))
-               OR ($5 = 'composite' AND EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = roles.id
-                  ))
-               OR ($5 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_capabilities WHERE role_id = roles.id
-                  ) AND NOT EXISTS (
+               $3::text IS NULL
+               OR ($3 = 'simple' AND EXISTS (
                     SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ) AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = roles.id
+                  ))
+               OR ($3 = 'composite' AND FALSE)
+               OR ($3 = 'empty' AND NOT EXISTS (
+                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
                   ))
              )
-           ORDER BY name LIMIT $6 OFFSET $7"#,
+           ORDER BY name LIMIT $4 OFFSET $5"#,
     )
     .bind(params.tenant_id)
-    .bind(params.scope_kind.clone())
-    .bind(params.scope_ref.clone())
     .bind(q.clone())
     .bind(derived_kind.clone())
     .bind(limit)
@@ -881,29 +1467,19 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR scope_kind = $2)
-             AND ($3::text IS NULL OR scope_ref = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR description ILIKE $4)
+             AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
              AND (
-               $5::text IS NULL
-               OR ($5 = 'simple' AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = roles.id
-                  ))
-               OR ($5 = 'composite' AND EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = roles.id
-                  ))
-               OR ($5 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_capabilities WHERE role_id = roles.id
-                  ) AND NOT EXISTS (
+               $3::text IS NULL
+               OR ($3 = 'simple' AND EXISTS (
                     SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ) AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = roles.id
+                  ))
+               OR ($3 = 'composite' AND FALSE)
+               OR ($3 = 'empty' AND NOT EXISTS (
+                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
                   ))
              )"#,
     )
     .bind(params.tenant_id)
-    .bind(params.scope_kind)
-    .bind(params.scope_ref)
     .bind(q)
     .bind(derived_kind)
     .fetch_one(pool)
@@ -917,18 +1493,16 @@ pub async fn role_derived_kind(pool: &PgPool, role_id: Uuid) -> Result<RoleDeriv
     use sqlx::Row;
     let row = sqlx::query(
         r#"SELECT
-              EXISTS (SELECT 1 FROM role_capabilities WHERE role_id = $1) AS has_capabilities,
               EXISTS (SELECT 1 FROM role_permission_blocks WHERE role_id = $1) AS has_permission_blocks,
-              EXISTS (SELECT 1 FROM role_composites WHERE parent_role_id = $1) AS has_children"#,
+              FALSE AS has_children"#,
     )
     .bind(role_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
-    let has_capabilities: bool = row.try_get("has_capabilities").map_err(db_err)?;
     let has_permission_blocks: bool = row.try_get("has_permission_blocks").map_err(db_err)?;
     let has_children: bool = row.try_get("has_children").map_err(db_err)?;
-    let has_simple_permissions = has_capabilities || has_permission_blocks;
+    let has_simple_permissions = has_permission_blocks;
     Ok(match (has_simple_permissions, has_children) {
         (true, false) => RoleDerivedKind::Simple,
         (false, true) => RoleDerivedKind::Composite,
@@ -942,31 +1516,13 @@ pub async fn role_derived_kind(pool: &PgPool, role_id: Uuid) -> Result<RoleDeriv
 }
 
 pub async fn child_roles(pool: &PgPool, role_id: Uuid) -> Result<Vec<Role>, AppError> {
-    sqlx::query_as::<_, Role>(
-        r#"SELECT r.id, r.name, r.tenant_id, r.description, r.scope_kind, r.scope_ref, r.created_at, r.updated_at
-           FROM roles r
-           JOIN role_composites rc ON rc.child_role_id = r.id
-           WHERE rc.parent_role_id = $1
-           ORDER BY r.name"#,
-    )
-    .bind(role_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    let _ = (pool, role_id);
+    Ok(Vec::new())
 }
 
 pub async fn parent_roles(pool: &PgPool, role_id: Uuid) -> Result<Vec<Role>, AppError> {
-    sqlx::query_as::<_, Role>(
-        r#"SELECT r.id, r.name, r.tenant_id, r.description, r.scope_kind, r.scope_ref, r.created_at, r.updated_at
-           FROM roles r
-           JOIN role_composites rc ON rc.parent_role_id = r.id
-           WHERE rc.child_role_id = $1
-           ORDER BY r.name"#,
-    )
-    .bind(role_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    let _ = (pool, role_id);
+    Ok(Vec::new())
 }
 
 async fn ensure_entities_exist(pool: &PgPool, entity_ids: &[Uuid]) -> Result<(), AppError> {
@@ -1006,8 +1562,8 @@ async fn validate_composite_children(
     use sqlx::Row;
     let rows = sqlx::query(
         r#"SELECT r.id, r.tenant_id,
-                  EXISTS (SELECT 1 FROM role_capabilities rc WHERE rc.role_id = r.id) AS has_capabilities,
-                  EXISTS (SELECT 1 FROM role_composites rc WHERE rc.parent_role_id = r.id) AS has_children
+                  EXISTS (SELECT 1 FROM effective_role_actions() rc WHERE rc.role_id = r.id) AS has_capabilities,
+                  FALSE AS has_children
            FROM roles r
            WHERE r.id = ANY($1::uuid[])"#,
     )
@@ -1155,6 +1711,221 @@ fn parse_group_scope_ref(scope_ref: Option<&str>) -> Result<(Uuid, &str), AppErr
     Ok((group_id, rest))
 }
 
+#[derive(Debug, Clone)]
+struct CapabilityValidationTarget {
+    object_kind: String,
+    object_type: Option<String>,
+}
+
+impl CapabilityValidationTarget {
+    fn label(&self) -> String {
+        self.object_type
+            .clone()
+            .unwrap_or_else(|| self.object_kind.clone())
+    }
+}
+
+async fn validate_capabilities_against_role_scope(
+    pool: &PgPool,
+    scope_kind: &ScopeKind,
+    scope_ref: Option<&str>,
+    capability_ids: &[Uuid],
+) -> Result<(), AppError> {
+    let target = role_scope_capability_target(pool, scope_kind, scope_ref).await?;
+    validate_capabilities_against_target(pool, capability_ids, target).await
+}
+
+async fn role_scope_capability_target(
+    pool: &PgPool,
+    scope_kind: &ScopeKind,
+    scope_ref: Option<&str>,
+) -> Result<Option<CapabilityValidationTarget>, AppError> {
+    match scope_kind {
+        ScopeKind::Platform | ScopeKind::Tenant => Ok(None),
+        ScopeKind::ObjectKind => {
+            let scope_ref = scope_ref
+                .ok_or_else(|| AppError::bad_request("object_kind scope requires scope_ref"))?;
+            Ok(Some(CapabilityValidationTarget {
+                object_kind: scope_ref.to_string(),
+                object_type: None,
+            }))
+        }
+        ScopeKind::ObjectType => {
+            let (object_kind, object_type) = parse_namespaced_object_type(scope_ref)?;
+            Ok(Some(CapabilityValidationTarget {
+                object_kind,
+                object_type: Some(object_type),
+            }))
+        }
+        ScopeKind::Object => {
+            let scope_ref = scope_ref
+                .ok_or_else(|| AppError::bad_request("object scope requires scope_ref"))?;
+            let object_id = scope_ref
+                .parse::<Uuid>()
+                .map_err(|_| AppError::bad_request("object scope_ref must be a UUID"))?;
+            resolve_exact_object_target(pool, object_id)
+                .await?
+                .map(Some)
+                .ok_or_else(|| AppError::bad_request("object scope references unknown object"))
+        }
+        ScopeKind::GroupObjectType | ScopeKind::GroupTreeObjectType => {
+            let (_, object_type_ref) = parse_group_scope_ref(scope_ref)?;
+            let (object_kind, object_type) = parse_namespaced_object_type(Some(object_type_ref))?;
+            Ok(Some(CapabilityValidationTarget {
+                object_kind,
+                object_type: Some(object_type),
+            }))
+        }
+        ScopeKind::GroupChildKind | ScopeKind::GroupDescendantKind => {
+            let (_, object_kind) = parse_group_scope_ref(scope_ref)?;
+            if object_kind != "group" {
+                return Err(AppError::bad_request(
+                    "group kind scope_ref must end with ':group'",
+                ));
+            }
+            Ok(Some(CapabilityValidationTarget {
+                object_kind: "group".to_string(),
+                object_type: None,
+            }))
+        }
+    }
+}
+
+async fn validate_capabilities_against_target(
+    pool: &PgPool,
+    capability_ids: &[Uuid],
+    target: Option<CapabilityValidationTarget>,
+) -> Result<(), AppError> {
+    if capability_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut unique_capability_ids = capability_ids.to_vec();
+    unique_capability_ids.sort_unstable();
+    unique_capability_ids.dedup();
+
+    use sqlx::Row;
+    let rows = sqlx::query("SELECT id, name FROM actions WHERE id = ANY($1::uuid[])")
+        .bind(&unique_capability_ids)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
+    let capability_names = rows
+        .into_iter()
+        .map(|row| {
+            let id: Uuid = row.try_get("id").map_err(db_err)?;
+            let name: String = row.try_get("name").map_err(db_err)?;
+            Ok((id, name))
+        })
+        .collect::<Result<HashMap<Uuid, String>, AppError>>()?;
+
+    if capability_names.len() != unique_capability_ids.len() {
+        let missing = unique_capability_ids
+            .iter()
+            .find(|id| !capability_names.contains_key(id))
+            .copied()
+            .unwrap_or_default();
+        return Err(AppError::bad_request(format!(
+            "capability {missing} does not exist"
+        )));
+    }
+
+    let Some(target) = target else {
+        return Ok(());
+    };
+
+    let invalid_rows = sqlx::query(
+        r#"SELECT c.name
+           FROM actions c
+           WHERE c.id = ANY($1::uuid[])
+             AND NOT EXISTS (
+               SELECT 1
+               FROM action_applicability ca
+               WHERE ca.action_id = c.id
+                 AND ca.object_kind = $2
+                 AND ($3::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $3)
+             )
+           ORDER BY c.name"#,
+    )
+    .bind(&unique_capability_ids)
+    .bind(&target.object_kind)
+    .bind(&target.object_type)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    if let Some(row) = invalid_rows.first() {
+        let name: String = row.try_get("name").map_err(db_err)?;
+        return Err(AppError::bad_request(format!(
+            "capability {name} is not applicable to {}",
+            target.label()
+        )));
+    }
+
+    Ok(())
+}
+
+fn parse_namespaced_object_type(value: Option<&str>) -> Result<(String, String), AppError> {
+    let value =
+        value.ok_or_else(|| AppError::bad_request("object_type scope requires scope_ref"))?;
+    let (object_kind, _) = value.split_once(':').ok_or_else(|| {
+        AppError::bad_request("object type must be namespaced as '<kind>:<sub-kind>'")
+    })?;
+    Ok((object_kind.to_string(), value.to_string()))
+}
+
+async fn resolve_exact_object_target(
+    pool: &PgPool,
+    object_id: Uuid,
+) -> Result<Option<CapabilityValidationTarget>, AppError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"SELECT object_kind, object_type
+           FROM (
+             SELECT 'entity'::text AS object_kind, ('entity:' || kind)::text AS object_type
+             FROM entities
+             WHERE id = $1
+             UNION ALL
+             SELECT 'resource'::text AS object_kind, ('resource:' || kind)::text AS object_type
+             FROM resources
+             WHERE id = $1
+             UNION ALL
+             SELECT 'group'::text AS object_kind, NULL::text AS object_type
+             FROM groups
+             WHERE id = $1
+             UNION ALL
+             SELECT 'tenant'::text AS object_kind, NULL::text AS object_type
+             FROM tenants
+             WHERE id = $1
+             UNION ALL
+             SELECT 'role'::text AS object_kind, NULL::text AS object_type
+             FROM roles
+             WHERE id = $1
+             UNION ALL
+             SELECT 'policy'::text AS object_kind, NULL::text AS object_type
+             FROM effective_access_edges()
+             WHERE id = $1
+             UNION ALL
+             SELECT 'credential'::text AS object_kind, NULL::text AS object_type
+             FROM credentials
+             WHERE id = $1
+           ) AS objects
+           LIMIT 1"#,
+    )
+    .bind(object_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+
+    row.map(|row| {
+        Ok(CapabilityValidationTarget {
+            object_kind: row.try_get("object_kind").map_err(db_err)?,
+            object_type: row.try_get("object_type").map_err(db_err)?,
+        })
+    })
+    .transpose()
+}
+
 pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
         r#"UPDATE roles
@@ -1162,7 +1933,7 @@ pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Rol
                description = COALESCE($3, description),
                updated_at  = now()
            WHERE id = $1
-           RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
+           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
@@ -1192,27 +1963,27 @@ pub async fn add_role_capability(
     role_id: Uuid,
     cap_id: Uuid,
 ) -> Result<(), AppError> {
-    let has_children: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM role_composites WHERE parent_role_id = $1)",
-    )
-    .bind(role_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-    if has_children {
-        return Err(AppError::bad_request(
-            "composite role cannot have direct capabilities",
-        ));
-    }
+    let role = get_role(pool, role_id).await?;
+    let scope_kind = if role.tenant_id.is_some() {
+        ScopeKind::Tenant
+    } else {
+        ScopeKind::Platform
+    };
+    let scope_ref = role.tenant_id.map(|tenant_id| tenant_id.to_string());
+    validate_capabilities_against_role_scope(pool, &scope_kind, scope_ref.as_deref(), &[cap_id])
+        .await?;
     crate::guardrails::validate_role_capability(pool, role_id, cap_id).await?;
-    sqlx::query(
-        "INSERT INTO role_capabilities (role_id, capability_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    insert_role_capability_as_permission_block(
+        &mut tx,
+        role_id,
+        role.tenant_id,
+        &scope_kind,
+        scope_ref.as_deref(),
+        cap_id,
     )
-    .bind(role_id)
-    .bind(cap_id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+    .await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -1221,25 +1992,9 @@ pub async fn add_composite_role_child(
     parent_role_id: Uuid,
     child_role_id: Uuid,
 ) -> Result<(), AppError> {
-    let parent = get_role(pool, parent_role_id).await?;
-    let has_capabilities: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM role_capabilities WHERE role_id = $1)")
-            .bind(parent_role_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
-    if has_capabilities {
-        return Err(AppError::bad_request("simple role cannot have child roles"));
-    }
-    validate_composite_children(pool, parent_role_id, parent.tenant_id, &[child_role_id]).await?;
-    sqlx::query(
-        "INSERT INTO role_composites (parent_role_id, child_role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-    )
-    .bind(parent_role_id)
-    .bind(child_role_id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    copy_role_permission_blocks(&mut tx, parent_role_id, child_role_id).await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -1248,12 +2003,7 @@ pub async fn remove_composite_role_child(
     parent_role_id: Uuid,
     child_role_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM role_composites WHERE parent_role_id = $1 AND child_role_id = $2")
-        .bind(parent_role_id)
-        .bind(child_role_id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+    let _ = (pool, parent_role_id, child_role_id);
     Ok(())
 }
 
@@ -1262,32 +2012,19 @@ pub async fn replace_composite_role_children(
     parent_role_id: Uuid,
     child_role_ids: &[Uuid],
 ) -> Result<(), AppError> {
-    let parent = get_role(pool, parent_role_id).await?;
-    let has_capabilities: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM role_capabilities WHERE role_id = $1)")
-            .bind(parent_role_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
-    if has_capabilities && !child_role_ids.is_empty() {
-        return Err(AppError::bad_request("simple role cannot have child roles"));
-    }
-    validate_composite_children(pool, parent_role_id, parent.tenant_id, child_role_ids).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
-    sqlx::query("DELETE FROM role_composites WHERE parent_role_id = $1")
-        .bind(parent_role_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+    sqlx::query(
+        r#"DELETE FROM permission_blocks
+           WHERE id IN (
+             SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1
+           )"#,
+    )
+    .bind(parent_role_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
     for child_role_id in child_role_ids {
-        sqlx::query(
-            "INSERT INTO role_composites (parent_role_id, child_role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(parent_role_id)
-        .bind(child_role_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        copy_role_permission_blocks(&mut tx, parent_role_id, *child_role_id).await?;
     }
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -1298,12 +2035,20 @@ pub async fn remove_role_capability(
     role_id: Uuid,
     cap_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM role_capabilities WHERE role_id = $1 AND capability_id = $2")
-        .bind(role_id)
-        .bind(cap_id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+    sqlx::query(
+        r#"DELETE FROM permission_blocks
+           WHERE id IN (
+             SELECT rpb.permission_block_id
+             FROM role_permission_blocks rpb
+             JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+             WHERE rpb.role_id = $1 AND pba.action_id = $2
+           )"#,
+    )
+    .bind(role_id)
+    .bind(cap_id)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
     Ok(())
 }
 
@@ -1312,9 +2057,9 @@ pub async fn get_role_capabilities(
     role_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
     sqlx::query_as::<_, Capability>(
-        r#"SELECT c.id, c.name, c.resource_kind, c.description, c.created_at, c.updated_at
-           FROM capabilities c
-           JOIN role_capabilities rc ON rc.capability_id = c.id
+        r#"SELECT c.id, c.name, c.description, c.created_at, c.updated_at
+           FROM actions c
+           JOIN effective_role_actions() rc ON rc.capability_id = c.id
            WHERE rc.role_id = $1"#,
     )
     .bind(role_id)
@@ -1330,23 +2075,30 @@ pub async fn create_capability(
     req: CreateCapability,
 ) -> Result<Capability, AppError> {
     let id = Uuid::new_v4();
-    sqlx::query_as::<_, Capability>(
-        r#"INSERT INTO capabilities (id, name, resource_kind, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, resource_kind, description, created_at, updated_at"#,
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let capability = sqlx::query_as::<_, Capability>(
+        r#"INSERT INTO actions (id, name, description)
+           VALUES ($1, $2, $3)
+           RETURNING id, name, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
-    .bind(req.resource_kind)
     .bind(req.description)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+
+    let applicability = req.applicability.unwrap_or_default();
+    if !applicability.is_empty() {
+        replace_capability_applicability_in_tx(&mut tx, id, &applicability).await?;
+    }
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(capability)
 }
 
 pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppError> {
     sqlx::query_as::<_, Capability>(
-        "SELECT id, name, resource_kind, description, created_at, updated_at FROM capabilities WHERE id = $1",
+        "SELECT id, name, description, created_at, updated_at FROM actions WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -1365,11 +2117,21 @@ pub async fn list_capabilities(
     let offset = params.offset.max(0);
 
     let items = sqlx::query_as::<_, Capability>(
-        r#"SELECT id, name, resource_kind, description, created_at, updated_at FROM capabilities
-           WHERE ($1::text IS NULL OR resource_kind = $1)
-           ORDER BY name LIMIT $2 OFFSET $3"#,
+        r#"SELECT id, name, description, created_at, updated_at FROM actions c
+           WHERE (
+               $1::text IS NULL
+               OR EXISTS (
+                   SELECT 1
+                   FROM action_applicability ca
+                   WHERE ca.action_id = c.id
+                     AND ca.object_kind = $1
+                     AND ($2::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $2)
+               )
+           )
+           ORDER BY name LIMIT $3 OFFSET $4"#,
     )
-    .bind(&params.resource_kind)
+    .bind(&params.object_kind)
+    .bind(&params.object_type)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
@@ -1377,9 +2139,20 @@ pub async fn list_capabilities(
     .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM capabilities WHERE ($1::text IS NULL OR resource_kind = $1)",
+        r#"SELECT COUNT(*) FROM actions c
+           WHERE (
+               $1::text IS NULL
+               OR EXISTS (
+                   SELECT 1
+                   FROM action_applicability ca
+                   WHERE ca.action_id = c.id
+                     AND ca.object_kind = $1
+                     AND ($2::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $2)
+               )
+           )"#,
     )
-    .bind(&params.resource_kind)
+    .bind(&params.object_kind)
+    .bind(&params.object_type)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1387,34 +2160,234 @@ pub async fn list_capabilities(
     Ok(crate::models::capability::CapabilityList { items, total })
 }
 
+pub async fn capability_applicability(
+    pool: &PgPool,
+    capability_id: Uuid,
+) -> Result<Vec<CapabilityApplicability>, AppError> {
+    sqlx::query_as::<_, CapabilityApplicability>(
+        r#"SELECT object_kind, object_type
+           FROM action_applicability
+           WHERE action_id = $1
+           ORDER BY object_kind, object_type NULLS FIRST"#,
+    )
+    .bind(capability_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn list_capability_applicability(
+    pool: &PgPool,
+    action_name: Option<String>,
+    object_kind: Option<String>,
+    object_type: Option<String>,
+    limit: i64,
+    offset: i64,
+) -> Result<CapabilityApplicabilityList, AppError> {
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+    let action_name = action_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let object_kind = object_kind
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let object_type = object_type
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let action_pattern = action_name.as_ref().map(|value| format!("%{value}%"));
+
+    let items = sqlx::query_as::<_, CapabilityApplicabilityEntry>(
+        r#"SELECT c.id AS capability_id,
+                  c.name AS capability_name,
+                  c.description,
+                  ca.object_kind,
+                  ca.object_type,
+                  ca.created_at
+           FROM action_applicability ca
+           JOIN actions c ON c.id = ca.action_id
+           WHERE ($3::text IS NULL OR c.name ILIKE $3)
+             AND ($4::text IS NULL OR ca.object_kind = $4)
+             AND ($5::text IS NULL OR ca.object_type = $5)
+           ORDER BY c.name, ca.object_kind, ca.object_type NULLS FIRST
+           LIMIT $1 OFFSET $2"#,
+    )
+    .bind(limit)
+    .bind(offset)
+    .bind(&action_pattern)
+    .bind(&object_kind)
+    .bind(&object_type)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let total = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM action_applicability ca
+           JOIN actions c ON c.id = ca.action_id
+           WHERE ($1::text IS NULL OR c.name ILIKE $1)
+             AND ($2::text IS NULL OR ca.object_kind = $2)
+             AND ($3::text IS NULL OR ca.object_type = $3)"#,
+    )
+    .bind(&action_pattern)
+    .bind(&object_kind)
+    .bind(&object_type)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(CapabilityApplicabilityList { items, total })
+}
+
+pub async fn add_capability_applicability(
+    pool: &PgPool,
+    capability_id: Uuid,
+    object_kind: String,
+    object_type: Option<String>,
+) -> Result<CapabilityApplicabilityEntry, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+
+    let exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
+            .bind(capability_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    if !exists {
+        return Err(AppError::not_found(format!(
+            "capability {capability_id} not found"
+        )));
+    }
+
+    sqlx::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING"#,
+    )
+    .bind(capability_id)
+    .bind(&object_kind)
+    .bind(&object_type)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    let entry = sqlx::query_as::<_, CapabilityApplicabilityEntry>(
+        r#"SELECT c.id AS capability_id,
+                  c.name AS capability_name,
+                  c.description,
+                  ca.object_kind,
+                  ca.object_type,
+                  ca.created_at
+           FROM action_applicability ca
+           JOIN actions c ON c.id = ca.action_id
+           WHERE ca.action_id = $1
+             AND ca.object_kind = $2
+             AND ca.object_type IS NOT DISTINCT FROM $3"#,
+    )
+    .bind(capability_id)
+    .bind(&object_kind)
+    .bind(&object_type)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(entry)
+}
+
+pub async fn remove_capability_applicability(
+    pool: &PgPool,
+    capability_id: Uuid,
+    object_kind: String,
+    object_type: Option<String>,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"DELETE FROM action_applicability
+           WHERE action_id = $1
+             AND object_kind = $2
+             AND object_type IS NOT DISTINCT FROM $3"#,
+    )
+    .bind(capability_id)
+    .bind(object_kind)
+    .bind(object_type)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found(
+            "capability applicability row not found",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn update_capability(
     pool: &PgPool,
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
-    sqlx::query_as::<_, Capability>(
-        r#"UPDATE capabilities
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let updated = sqlx::query_as::<_, Capability>(
+        r#"UPDATE actions
            SET name          = COALESCE($2, name),
-               resource_kind = COALESCE($3, resource_kind),
-               description   = COALESCE($4, description),
+               description   = COALESCE($3, description),
                updated_at    = now()
            WHERE id = $1
-           RETURNING id, name, resource_kind, description, created_at, updated_at"#,
+           RETURNING id, name, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
-    .bind(req.resource_kind)
     .bind(req.description)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("capability {id} not found")),
         other => AppError::Database(other),
-    })
+    })?;
+
+    if let Some(applicability) = req.applicability {
+        replace_capability_applicability_in_tx(&mut tx, id, &applicability).await?;
+    }
+
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(updated)
+}
+
+async fn replace_capability_applicability_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    capability_id: Uuid,
+    applicability: &[CapabilityApplicabilityInput],
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM action_applicability WHERE action_id = $1")
+        .bind(capability_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+
+    let mut seen = HashSet::new();
+    for item in applicability {
+        if !seen.insert((item.object_kind.as_str(), item.object_type.as_deref())) {
+            continue;
+        }
+        sqlx::query(
+            r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+               VALUES ($1, $2, $3)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(capability_id)
+        .bind(&item.object_kind)
+        .bind(&item.object_type)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    Ok(())
 }
 
 pub async fn delete_capability(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM capabilities WHERE id = $1")
+    let result = sqlx::query("DELETE FROM actions WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await
@@ -1443,25 +2416,78 @@ pub async fn create_policy(
     } else {
         req.conditions
     };
-    let policy = sqlx::query_as::<_, PolicyBinding>(
-        r#"INSERT INTO policy_bindings
-             (id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           RETURNING id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at"#,
-    )
-    .bind(id)
-    .bind(req.tenant_id)
-    .bind(req.subject_kind)
-    .bind(req.subject_id)
-    .bind(req.grant_kind)
-    .bind(req.grant_id)
-    .bind(req.scope_kind)
-    .bind(req.scope_ref)
-    .bind(req.effect)
-    .bind(conditions)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    match req.grant_kind {
+        GrantKind::Role => {
+            if req.effect != Effect::Allow || conditions != serde_json::json!({}) {
+                return Err(AppError::bad_request(
+                    "role assignment supports only allow effect without conditions; use direct policy for deny or conditional grants",
+                ));
+            }
+            sqlx::query(
+                r#"INSERT INTO role_assignments
+                     (id, tenant_id, subject_kind, subject_id, role_id)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+            )
+            .bind(id)
+            .bind(req.tenant_id)
+            .bind(req.subject_kind)
+            .bind(req.subject_id)
+            .bind(req.grant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        GrantKind::Capability => {
+            let block = permission_block_from_legacy_scope(
+                req.tenant_id,
+                &req.scope_kind,
+                req.scope_ref.as_deref(),
+            )?;
+            let permission_block_id: Uuid = sqlx::query_scalar(
+                r#"INSERT INTO permission_blocks
+                     (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                   RETURNING id"#,
+            )
+            .bind(block.tenant_id)
+            .bind(block.scope_mode)
+            .bind(block.object_kind)
+            .bind(block.object_type)
+            .bind(block.object_id)
+            .bind(block.group_id)
+            .bind(req.effect)
+            .bind(conditions)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            sqlx::query(
+                r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+                   VALUES ($1, $2)"#,
+            )
+            .bind(permission_block_id)
+            .bind(req.grant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            sqlx::query(
+                r#"INSERT INTO direct_policies
+                     (id, tenant_id, subject_kind, subject_id, permission_block_id)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+            )
+            .bind(id)
+            .bind(req.tenant_id)
+            .bind(req.subject_kind)
+            .bind(req.subject_id)
+            .bind(permission_block_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+    }
+    tx.commit().await.map_err(db_err)?;
+
+    let policy = get_policy(pool, id).await?;
 
     if should_sync_membership {
         if let Some(tenant_id) = membership_tenant_id {
@@ -1499,7 +2525,7 @@ async fn sync_tenant_membership_for_policy(
 pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppError> {
     sqlx::query_as::<_, PolicyBinding>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at
-           FROM policy_bindings WHERE id = $1"#,
+           FROM effective_access_edges() WHERE id = $1"#,
     )
     .bind(id)
     .fetch_one(pool)
@@ -1519,7 +2545,7 @@ pub async fn list_policies(pool: &PgPool, params: ListPolicies) -> Result<Policy
 
     let items = sqlx::query_as::<_, PolicyBinding>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at
-           FROM policy_bindings
+           FROM effective_access_edges()
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::uuid IS NULL OR subject_id = $2)
              AND ($3::text IS NULL OR subject_kind = $3)
@@ -1536,7 +2562,7 @@ pub async fn list_policies(pool: &PgPool, params: ListPolicies) -> Result<Policy
     .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM policy_bindings
+        r#"SELECT COUNT(*) FROM effective_access_edges()
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::uuid IS NULL OR subject_id = $2)
              AND ($3::text IS NULL OR subject_kind = $3)"#,
@@ -1563,7 +2589,7 @@ pub async fn role_policies(
     let items = sqlx::query_as::<_, PolicyBinding>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id,
                   scope_kind, scope_ref, effect, conditions, created_at
-           FROM policy_bindings
+           FROM effective_access_edges()
            WHERE grant_kind = 'role' AND grant_id = $1
            ORDER BY created_at DESC
            LIMIT $2 OFFSET $3"#,
@@ -1577,7 +2603,7 @@ pub async fn role_policies(
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
-           FROM policy_bindings
+           FROM effective_access_edges()
            WHERE grant_kind = 'role' AND grant_id = $1"#,
     )
     .bind(role_id)
@@ -1586,6 +2612,295 @@ pub async fn role_policies(
     .map_err(db_err)?;
 
     Ok(PolicyList { items, total })
+}
+
+pub async fn create_role_assignment(
+    pool: &PgPool,
+    req: CreateRoleAssignment,
+) -> Result<RoleAssignment, AppError> {
+    validate_role_assignment(pool, &req).await?;
+    sqlx::query_as::<_, RoleAssignment>(
+        r#"INSERT INTO role_assignments
+             (tenant_id, subject_kind, subject_id, role_id)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, tenant_id, subject_kind, subject_id, role_id, created_at"#,
+    )
+    .bind(req.tenant_id)
+    .bind(req.subject_kind)
+    .bind(req.subject_id)
+    .bind(req.role_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn list_role_assignments(
+    pool: &PgPool,
+    params: ListRoleAssignments,
+) -> Result<RoleAssignmentList, AppError> {
+    let limit = params.limit.clamp(1, 100);
+    let offset = params.offset.max(0);
+    let items = sqlx::query_as::<_, RoleAssignment>(
+        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
+           FROM role_assignments
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR subject_kind = $2)
+             AND ($3::uuid IS NULL OR subject_id = $3)
+             AND ($4::uuid IS NULL OR role_id = $4)
+           ORDER BY created_at DESC
+           LIMIT $5 OFFSET $6"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.subject_kind.clone())
+    .bind(params.subject_id)
+    .bind(params.role_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let total = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM role_assignments
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR subject_kind = $2)
+             AND ($3::uuid IS NULL OR subject_id = $3)
+             AND ($4::uuid IS NULL OR role_id = $4)"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.subject_kind)
+    .bind(params.subject_id)
+    .bind(params.role_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(RoleAssignmentList { items, total })
+}
+
+pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignment, AppError> {
+    sqlx::query_as::<_, RoleAssignment>(
+        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
+           FROM role_assignments
+           WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("role assignment {id} not found")),
+        other => AppError::Database(other),
+    })
+}
+
+pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found(format!(
+            "role assignment {id} not found"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn create_direct_policy(
+    pool: &PgPool,
+    req: CreateDirectPolicy,
+) -> Result<DirectPolicy, AppError> {
+    validate_direct_policy(pool, &req).await?;
+    sqlx::query_as::<_, DirectPolicy>(
+        r#"INSERT INTO direct_policies
+             (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, tenant_id, subject_kind, subject_id, permission_block_id, created_at"#,
+    )
+    .bind(req.tenant_id)
+    .bind(req.subject_kind)
+    .bind(req.subject_id)
+    .bind(req.permission_block_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn list_direct_policies(
+    pool: &PgPool,
+    params: ListDirectPolicies,
+) -> Result<DirectPolicyList, AppError> {
+    let limit = params.limit.clamp(1, 100);
+    let offset = params.offset.max(0);
+    let items = sqlx::query_as::<_, DirectPolicy>(
+        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
+           FROM direct_policies
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR subject_kind = $2)
+             AND ($3::uuid IS NULL OR subject_id = $3)
+             AND ($4::uuid IS NULL OR permission_block_id = $4)
+           ORDER BY created_at DESC
+           LIMIT $5 OFFSET $6"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.subject_kind.clone())
+    .bind(params.subject_id)
+    .bind(params.permission_block_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let total = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM direct_policies
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR subject_kind = $2)
+             AND ($3::uuid IS NULL OR subject_id = $3)
+             AND ($4::uuid IS NULL OR permission_block_id = $4)"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.subject_kind)
+    .bind(params.subject_id)
+    .bind(params.permission_block_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(DirectPolicyList { items, total })
+}
+
+pub async fn get_direct_policy(pool: &PgPool, id: Uuid) -> Result<DirectPolicy, AppError> {
+    sqlx::query_as::<_, DirectPolicy>(
+        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
+           FROM direct_policies
+           WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("direct policy {id} not found")),
+        other => AppError::Database(other),
+    })
+}
+
+pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found(format!("direct policy {id} not found")));
+    }
+    Ok(())
+}
+
+async fn validate_role_assignment(
+    pool: &PgPool,
+    req: &CreateRoleAssignment,
+) -> Result<(), AppError> {
+    let role_tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+            .bind(req.role_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::bad_request("role assignment references unknown role"))?;
+    if role_tenant_id != req.tenant_id {
+        return Err(AppError::bad_request(
+            "role assignment tenantId must match role tenantId",
+        ));
+    }
+    validate_subject_boundary(pool, req.tenant_id, &req.subject_kind, req.subject_id).await?;
+    crate::guardrails::validate_role_assignment(
+        pool,
+        req.tenant_id,
+        req.subject_kind.clone(),
+        req.subject_id,
+        req.role_id,
+    )
+    .await
+}
+
+async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Result<(), AppError> {
+    let block_tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
+            .bind(req.permission_block_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| {
+                AppError::bad_request("direct policy references unknown permission block")
+            })?;
+    if block_tenant_id != req.tenant_id {
+        return Err(AppError::bad_request(
+            "direct policy tenantId must match permission block tenantId",
+        ));
+    }
+    validate_subject_boundary(pool, req.tenant_id, &req.subject_kind, req.subject_id).await
+}
+
+async fn validate_subject_boundary(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    subject_kind: &SubjectKind,
+    subject_id: Uuid,
+) -> Result<(), AppError> {
+    match subject_kind {
+        SubjectKind::Entity => {
+            let entity_tenant_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+                    .bind(subject_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(db_err)?
+                    .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
+            if let Some(tenant_id) = tenant_id {
+                let member: bool = sqlx::query_scalar(
+                    r#"SELECT EXISTS (
+                         SELECT 1 FROM tenant_memberships
+                         WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'
+                       )"#,
+                )
+                .bind(tenant_id)
+                .bind(subject_id)
+                .fetch_one(pool)
+                .await
+                .map_err(db_err)?;
+                if entity_tenant_id != Some(tenant_id) && !member {
+                    return Err(AppError::bad_request(
+                        "tenant assignment subject entity must belong to the tenant",
+                    ));
+                }
+            } else if entity_tenant_id.is_some() {
+                return Err(AppError::bad_request(
+                    "platform assignment cannot target tenant-owned entity",
+                ));
+            }
+        }
+        SubjectKind::Group => {
+            let group_tenant_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT tenant_id FROM principal_groups WHERE id = $1")
+                    .bind(subject_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(db_err)?
+                    .ok_or_else(|| {
+                        AppError::bad_request("assignment references unknown principal group")
+                    })?;
+            if group_tenant_id != tenant_id {
+                return Err(AppError::bad_request(
+                    "assignment subject principal group must be in the same tenant",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn subject_role_assignments(
@@ -1631,11 +2946,9 @@ pub async fn subject_role_assignments(
              r.name AS role_name,
              r.tenant_id AS role_tenant_id,
              r.description AS role_description,
-             r.scope_kind AS role_scope_kind,
-             r.scope_ref AS role_scope_ref,
              r.created_at AS role_created_at,
              r.updated_at AS role_updated_at
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
            WHERE ($1::uuid IS NULL OR pb.tenant_id = $1)
              AND pb.subject_kind = $2
@@ -1643,18 +2956,12 @@ pub async fn subject_role_assignments(
              AND ($4::text IS NULL OR r.name ILIKE $4 OR r.description ILIKE $4)
              AND (
                $5::text IS NULL
-               OR ($5 = 'simple' AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = r.id
-                  ))
-               OR ($5 = 'composite' AND EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = r.id
-                  ))
-               OR ($5 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_capabilities WHERE role_id = r.id
-                  ) AND NOT EXISTS (
+               OR ($5 = 'simple' AND EXISTS (
                     SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
-                  ) AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = r.id
+                  ))
+               OR ($5 = 'composite' AND FALSE)
+               OR ($5 = 'empty' AND NOT EXISTS (
+                    SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
                   ))
              )
            ORDER BY pb.created_at DESC
@@ -1693,8 +3000,6 @@ pub async fn subject_role_assignments(
                     name: row.try_get("role_name").map_err(db_err)?,
                     tenant_id: row.try_get("role_tenant_id").map_err(db_err)?,
                     description: row.try_get("role_description").map_err(db_err)?,
-                    scope_kind: row.try_get("role_scope_kind").map_err(db_err)?,
-                    scope_ref: row.try_get("role_scope_ref").map_err(db_err)?,
                     created_at: row.try_get("role_created_at").map_err(db_err)?,
                     updated_at: row.try_get("role_updated_at").map_err(db_err)?,
                 },
@@ -1704,7 +3009,7 @@ pub async fn subject_role_assignments(
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
            WHERE ($1::uuid IS NULL OR pb.tenant_id = $1)
              AND pb.subject_kind = $2
@@ -1712,18 +3017,12 @@ pub async fn subject_role_assignments(
              AND ($4::text IS NULL OR r.name ILIKE $4 OR r.description ILIKE $4)
              AND (
                $5::text IS NULL
-               OR ($5 = 'simple' AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = r.id
-                  ))
-               OR ($5 = 'composite' AND EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = r.id
-                  ))
-               OR ($5 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_capabilities WHERE role_id = r.id
-                  ) AND NOT EXISTS (
+               OR ($5 = 'simple' AND EXISTS (
                     SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
-                  ) AND NOT EXISTS (
-                    SELECT 1 FROM role_composites WHERE parent_role_id = r.id
+                  ))
+               OR ($5 = 'composite' AND FALSE)
+               OR ($5 = 'empty' AND NOT EXISTS (
+                    SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
                   ))
              )"#,
     )
@@ -1740,7 +3039,23 @@ pub async fn subject_role_assignments(
 }
 
 pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM policy_bindings WHERE id = $1")
+    let direct_block_id: Option<Uuid> = sqlx::query_scalar(
+        "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    if let Some(block_id) = direct_block_id {
+        sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
+            .bind(block_id)
+            .execute(pool)
+            .await
+            .map_err(db_err)?;
+        return Ok(());
+    }
+
+    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await
@@ -1768,7 +3083,7 @@ pub async fn object_tenant_id_by_id(
              UNION ALL
              SELECT tenant_id FROM roles WHERE id = $1
              UNION ALL
-             SELECT tenant_id FROM policy_bindings WHERE id = $1
+             SELECT tenant_id FROM effective_access_edges() WHERE id = $1
              UNION ALL
              SELECT t.id AS tenant_id FROM tenants t WHERE t.id = $1
              UNION ALL
@@ -1827,11 +3142,11 @@ pub async fn entity_access(
     let items = sqlx::query(
         r#"WITH bindings AS (
              SELECT pb.*, 'direct'::text AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              WHERE pb.subject_kind = 'entity' AND pb.subject_id = $1
              UNION ALL
              SELECT pb.*, ('group:' || g.name)::text AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              JOIN group_members gm ON gm.group_id = pb.subject_id
              JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
              WHERE pb.subject_kind = 'group' AND gm.entity_id = $1
@@ -1854,7 +3169,7 @@ pub async fn entity_access(
                  $5::uuid IS NULL
                  OR (b.grant_kind = 'capability' AND b.grant_id = $5)
                  OR (b.grant_kind = 'role' AND EXISTS (
-                   SELECT 1 FROM role_capabilities rc
+                   SELECT 1 FROM effective_role_actions() rc
                    WHERE rc.role_id = b.grant_id AND rc.capability_id = $5
                  ))
                )
@@ -1862,12 +3177,11 @@ pub async fn entity_access(
            SELECT e.*,
                   COALESCE(jsonb_agg(jsonb_build_object(
                     'id', c.id,
-                    'name', c.name,
-                    'resource_kind', c.resource_kind
+                    'name', c.name
                   ) ORDER BY c.name) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS capabilities
            FROM expanded e
-           LEFT JOIN role_capabilities rc ON e.grant_kind = 'role' AND rc.role_id = e.grant_id
-           LEFT JOIN capabilities c ON
+           LEFT JOIN effective_role_actions() rc ON e.grant_kind = 'role' AND rc.role_id = e.grant_id
+           LEFT JOIN actions c ON
              (e.grant_kind = 'capability' AND c.id = e.grant_id)
              OR (e.grant_kind = 'role' AND c.id = rc.capability_id)
            GROUP BY e.policy_id, e.grant_kind, e.grant_id, e.scope_kind, e.scope_ref,
@@ -1889,10 +3203,10 @@ pub async fn entity_access(
 
     let total: i64 = sqlx::query_scalar(
         r#"WITH bindings AS (
-             SELECT pb.* FROM policy_bindings pb
+             SELECT pb.* FROM effective_access_edges() pb
              WHERE pb.subject_kind = 'entity' AND pb.subject_id = $1
              UNION ALL
-             SELECT pb.* FROM policy_bindings pb
+             SELECT pb.* FROM effective_access_edges() pb
              JOIN group_members gm ON gm.group_id = pb.subject_id
              WHERE pb.subject_kind = 'group' AND gm.entity_id = $1
            )
@@ -1910,7 +3224,7 @@ pub async fn entity_access(
                $5::uuid IS NULL
                OR (b.grant_kind = 'capability' AND b.grant_id = $5)
                OR (b.grant_kind = 'role' AND EXISTS (
-                 SELECT 1 FROM role_capabilities rc
+                 SELECT 1 FROM effective_role_actions() rc
                  WHERE rc.role_id = b.grant_id AND rc.capability_id = $5
                ))
              )"#,
@@ -1962,7 +3276,7 @@ pub async fn resource_access(
     let base_sql = r#"WITH covered AS (
              SELECT pb.*, e.id AS entity_id, e.name AS entity_name, e.kind AS entity_kind,
                     e.tenant_id AS entity_tenant_id, 'direct'::text AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              JOIN entities e ON pb.subject_kind = 'entity' AND e.id = pb.subject_id
              WHERE pb.scope_kind = 'platform'
                 OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource')
@@ -1971,7 +3285,7 @@ pub async fn resource_access(
              UNION ALL
              SELECT pb.*, e.id AS entity_id, e.name AS entity_name, e.kind AS entity_kind,
                     e.tenant_id AS entity_tenant_id, ('group:' || g.name)::text AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              JOIN groups g ON pb.subject_kind = 'group' AND g.id = pb.subject_id
              JOIN group_members gm ON gm.group_id = g.id
              JOIN entities e ON e.id = gm.entity_id
@@ -1989,7 +3303,7 @@ pub async fn resource_access(
                  $5::uuid IS NULL
                  OR (c.grant_kind = 'capability' AND c.grant_id = $5)
                  OR (c.grant_kind = 'role' AND EXISTS (
-                   SELECT 1 FROM role_capabilities rc
+                   SELECT 1 FROM effective_role_actions() rc
                    WHERE rc.role_id = c.grant_id AND rc.capability_id = $5
                  ))
                )
@@ -2002,12 +3316,11 @@ pub async fn resource_access(
                   f.entity_tenant_id, f.role_id, f.role_name,
                   COALESCE(jsonb_agg(jsonb_build_object(
                     'id', cap.id,
-                    'name', cap.name,
-                    'resource_kind', cap.resource_kind
+                    'name', cap.name
                   ) ORDER BY cap.name) FILTER (WHERE cap.id IS NOT NULL), '[]'::jsonb) AS capabilities
            FROM filtered f
-           LEFT JOIN role_capabilities rc ON f.grant_kind = 'role' AND rc.role_id = f.grant_id
-           LEFT JOIN capabilities cap ON
+           LEFT JOIN effective_role_actions() rc ON f.grant_kind = 'role' AND rc.role_id = f.grant_id
+           LEFT JOIN actions cap ON
              (f.grant_kind = 'capability' AND cap.id = f.grant_id)
              OR (f.grant_kind = 'role' AND cap.id = rc.capability_id)
            GROUP BY f.id, f.grant_kind, f.grant_id, f.scope_kind, f.scope_ref, f.effect,
@@ -2137,7 +3450,7 @@ async fn subject_access(
     let group_clause = if include_groups {
         r#"UNION ALL
            SELECT pb.*, ('group:' || g.name)::text AS via
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            JOIN group_members gm ON gm.group_id = pb.subject_id
            JOIN groups g ON g.id = gm.group_id
            WHERE pb.subject_kind = 'group' AND gm.entity_id = $2"#
@@ -2152,7 +3465,7 @@ async fn subject_access(
     let base_sql = format!(
         r#"WITH bindings AS (
              SELECT pb.*, {direct_via} AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              WHERE pb.subject_kind = $1 AND pb.subject_id = $2
              {group_clause}
            ), expanded AS (
@@ -2174,7 +3487,7 @@ async fn subject_access(
                  $6::uuid IS NULL
                  OR (b.grant_kind = 'capability' AND b.grant_id = $6)
                  OR (b.grant_kind = 'role' AND EXISTS (
-                   SELECT 1 FROM role_capabilities rc
+                   SELECT 1 FROM effective_role_actions() rc
                    WHERE rc.role_id = b.grant_id AND rc.capability_id = $6
                  ))
                )
@@ -2185,12 +3498,11 @@ async fn subject_access(
            SELECT e.*,
                   COALESCE(jsonb_agg(jsonb_build_object(
                     'id', c.id,
-                    'name', c.name,
-                    'resource_kind', c.resource_kind
+                    'name', c.name
                   ) ORDER BY c.name) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS capabilities
            FROM expanded e
-           LEFT JOIN role_capabilities rc ON e.grant_kind = 'role' AND rc.role_id = e.grant_id
-           LEFT JOIN capabilities c ON
+           LEFT JOIN effective_role_actions() rc ON e.grant_kind = 'role' AND rc.role_id = e.grant_id
+           LEFT JOIN actions c ON
              (e.grant_kind = 'capability' AND c.id = e.grant_id)
              OR (e.grant_kind = 'role' AND c.id = rc.capability_id)
            GROUP BY e.policy_id, e.grant_kind, e.grant_id, e.scope_kind, e.scope_ref,
@@ -2244,7 +3556,6 @@ pub async fn role_holders(
         .map(|cap| CapabilitySummary {
             id: cap.id,
             name: cap.name,
-            resource_kind: cap.resource_kind,
         })
         .collect();
     let limit = params.limit.clamp(1, 100);
@@ -2257,7 +3568,7 @@ pub async fn role_holders(
                   e.tenant_id AS entity_tenant_id,
                   g.id AS group_id, g.name AS group_name, g.tenant_id AS group_tenant_id,
                   COALESCE(gmc.member_count, 0)::bigint AS member_count
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            LEFT JOIN entities e ON pb.subject_kind = 'entity' AND e.id = pb.subject_id
            LEFT JOIN groups g ON pb.subject_kind = 'group' AND g.id = pb.subject_id
            LEFT JOIN (
@@ -2282,7 +3593,7 @@ pub async fn role_holders(
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            LEFT JOIN entities e ON pb.subject_kind = 'entity' AND e.id = pb.subject_id
            LEFT JOIN groups g ON pb.subject_kind = 'group' AND g.id = pb.subject_id
            WHERE pb.grant_kind = 'role'
@@ -2345,6 +3656,461 @@ pub async fn role_holders(
     })
 }
 
+pub async fn authorized_object_ids(
+    pool: &PgPool,
+    params: AuthorizedObjectIdsQuery,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    match params.object_kind.as_str() {
+        "entity" => authorized_entity_ids(pool, params).await,
+        "resource" => authorized_resource_ids(pool, params).await,
+        other => Err(AppError::bad_request(format!(
+            "authorized object listing does not support object kind '{other}'"
+        ))),
+    }
+}
+
+async fn authorized_entity_ids(
+    pool: &PgPool,
+    params: AuthorizedObjectIdsQuery,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    let limit = params.limit.clamp(1, 500);
+    let offset = params.offset.max(0);
+    let q = search_pattern(params.q);
+
+    let sql = r#"WITH RECURSIVE subject_groups(group_id) AS (
+                   SELECT gm.group_id
+                   FROM group_members gm
+                   JOIN groups g ON g.id = gm.group_id
+                    AND g.status = 'active'
+                    AND g.group_type = 'principal'
+                   WHERE gm.entity_id = $1
+               ),
+               target_groups(id) AS (
+                   SELECT $8::uuid WHERE $8::uuid IS NOT NULL
+                   UNION ALL
+                   SELECT gh.child_id
+                   FROM group_hierarchy gh
+                   JOIN target_groups tg ON tg.id = gh.parent_id
+                   WHERE $9::boolean
+               ),
+               candidates AS (
+                   SELECT e.id, e.kind::text AS sub_kind, e.tenant_id, e.created_at,
+                          gep.group_id AS parent_group_id
+                   FROM entities e
+                   LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
+                   WHERE ($3::uuid IS NULL OR e.tenant_id = $3)
+                     AND ($4::text IS NULL OR e.kind::text = $4 OR 'entity:' || e.kind::text = $4)
+                     AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
+                     AND ($6::uuid IS NULL OR e.profile_id = $6)
+                     AND ($7::text IS NULL OR e.status::text = $7)
+                     AND ($8::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
+               ),
+               candidate_ancestors(object_id, ancestor_id) AS (
+                   SELECT c.id, gh.parent_id
+                   FROM candidates c
+                   JOIN group_hierarchy gh ON gh.child_id = c.parent_group_id
+                   UNION ALL
+                   SELECT ca.object_id, gh.parent_id
+                   FROM candidate_ancestors ca
+                   JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
+               ),
+               matching_capabilities AS (
+                   SELECT c.id AS capability_id, ca.object_kind, ca.object_type
+                   FROM actions c
+                   JOIN action_applicability ca ON ca.action_id = c.id
+                   WHERE c.name = $2
+               ),
+               role_grants AS (
+                   SELECT rpb.role_id AS root_role_id,
+                          CASE
+                              WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+                              WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+                              WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+                              WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+                              ELSE pb.scope_mode
+                          END AS scope_kind,
+                          CASE
+                              WHEN pb.scope_mode = 'platform' THEN NULL
+                              WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+                              WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+                              WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+                              WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+                              WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+                              WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+                              WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
+                          END AS scope_ref,
+                          pba.action_id AS capability_id
+                   FROM role_permission_blocks rpb
+                   JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+                   JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+               ),
+               authorized AS (
+                   SELECT c.id, c.created_at
+                   FROM candidates c
+                   WHERE EXISTS (
+                       SELECT 1
+                       FROM effective_access_edges() pb
+                       WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
+                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND pb.effect = 'allow'
+                         AND pb.conditions = '{}'::jsonb
+                         AND (
+                             (
+                               pb.grant_kind = 'capability'
+                               AND EXISTS (
+                                   SELECT 1 FROM matching_capabilities mc
+                                   WHERE mc.capability_id = pb.grant_id
+                                     AND mc.object_kind = 'entity'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
+                               )
+                               AND (
+                                   pb.scope_kind = 'platform'
+                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
+                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'entity')
+                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'entity:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
+                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                       SELECT 1 FROM candidate_ancestors ca
+                                       WHERE ca.object_id = c.id
+                                         AND pb.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
+                                   ))
+                               )
+                             )
+                             OR (
+                               pb.grant_kind = 'role'
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM role_grants rg
+                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
+                                   WHERE rg.root_role_id = pb.grant_id
+                                     AND mc.object_kind = 'entity'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
+                                     AND (
+                                         rg.scope_kind = 'platform'
+                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
+                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'entity')
+                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'entity:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
+                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                             SELECT 1 FROM candidate_ancestors ca
+                                             WHERE ca.object_id = c.id
+                                               AND rg.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
+                                         ))
+                                     )
+                               )
+                             )
+                         )
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM effective_access_edges() pb
+                         WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
+                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND pb.effect = 'deny'
+                         AND (
+                             (
+                               pb.grant_kind = 'capability'
+                               AND EXISTS (
+                                   SELECT 1 FROM matching_capabilities mc
+                                   WHERE mc.capability_id = pb.grant_id
+                                     AND mc.object_kind = 'entity'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
+                               )
+                               AND (
+                                   pb.scope_kind = 'platform'
+                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
+                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'entity')
+                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'entity:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
+                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                       SELECT 1 FROM candidate_ancestors ca
+                                       WHERE ca.object_id = c.id
+                                         AND pb.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
+                                   ))
+                               )
+                             )
+                             OR (
+                               pb.grant_kind = 'role'
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM role_grants rg
+                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
+                                   WHERE rg.root_role_id = pb.grant_id
+                                     AND mc.object_kind = 'entity'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
+                                     AND (
+                                         rg.scope_kind = 'platform'
+                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
+                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'entity')
+                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'entity:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
+                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                             SELECT 1 FROM candidate_ancestors ca
+                                             WHERE ca.object_id = c.id
+                                               AND rg.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
+                                         ))
+                                     )
+                               )
+                             )
+                         )
+                   )
+               )
+               SELECT id, COUNT(*) OVER() AS total
+               FROM authorized
+               ORDER BY created_at DESC
+               LIMIT $10 OFFSET $11"#;
+
+    let rows = sqlx::query(sql)
+        .bind(params.subject_id)
+        .bind(params.action)
+        .bind(params.tenant_id)
+        .bind(params.object_type)
+        .bind(q)
+        .bind(params.profile_id)
+        .bind(params.entity_status.map(|status| match status {
+            crate::models::enums::EntityStatus::Active => "active".to_string(),
+            crate::models::enums::EntityStatus::Inactive => "inactive".to_string(),
+            crate::models::enums::EntityStatus::Suspended => "suspended".to_string(),
+        }))
+        .bind(params.parent_group_id)
+        .bind(params.include_descendants)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
+
+    rows_to_authorized_object_ids(rows)
+}
+
+async fn authorized_resource_ids(
+    pool: &PgPool,
+    params: AuthorizedObjectIdsQuery,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    let limit = params.limit.clamp(1, 500);
+    let offset = params.offset.max(0);
+    let q = search_pattern(params.q);
+
+    let sql = r#"WITH RECURSIVE subject_groups(group_id) AS (
+                   SELECT gm.group_id
+                   FROM group_members gm
+                   JOIN groups g ON g.id = gm.group_id
+                    AND g.status = 'active'
+                    AND g.group_type = 'principal'
+                   WHERE gm.entity_id = $1
+               ),
+               target_groups(id) AS (
+                   SELECT $6::uuid WHERE $6::uuid IS NOT NULL
+                   UNION ALL
+                   SELECT gh.child_id
+                   FROM group_hierarchy gh
+                   JOIN target_groups tg ON tg.id = gh.parent_id
+                   WHERE $7::boolean
+               ),
+               candidates AS (
+                   SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at,
+                          grp.group_id AS parent_group_id
+                   FROM resources r
+                   LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
+                   WHERE ($3::uuid IS NULL OR r.tenant_id = $3)
+                     AND ($4::text IS NULL OR r.kind = $4 OR 'resource:' || r.kind = $4)
+                     AND ($5::text IS NULL OR r.name ILIKE $5 OR r.attributes::text ILIKE $5)
+                     AND ($6::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+               ),
+               candidate_ancestors(object_id, ancestor_id) AS (
+                   SELECT c.id, gh.parent_id
+                   FROM candidates c
+                   JOIN group_hierarchy gh ON gh.child_id = c.parent_group_id
+                   UNION ALL
+                   SELECT ca.object_id, gh.parent_id
+                   FROM candidate_ancestors ca
+                   JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
+               ),
+               matching_capabilities AS (
+                   SELECT c.id AS capability_id, ca.object_kind, ca.object_type
+                   FROM actions c
+                   JOIN action_applicability ca ON ca.action_id = c.id
+                   WHERE c.name = $2
+               ),
+               role_grants AS (
+                   SELECT rpb.role_id AS root_role_id,
+                          CASE
+                              WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+                              WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+                              WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+                              WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+                              ELSE pb.scope_mode
+                          END AS scope_kind,
+                          CASE
+                              WHEN pb.scope_mode = 'platform' THEN NULL
+                              WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+                              WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+                              WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+                              WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+                              WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+                              WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+                              WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
+                          END AS scope_ref,
+                          pba.action_id AS capability_id
+                   FROM role_permission_blocks rpb
+                   JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+                   JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+               ),
+               authorized AS (
+                   SELECT c.id, c.created_at
+                   FROM candidates c
+                   WHERE EXISTS (
+                       SELECT 1
+                       FROM effective_access_edges() pb
+                       WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
+                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND pb.effect = 'allow'
+                         AND pb.conditions = '{}'::jsonb
+                         AND (
+                             (
+                               pb.grant_kind = 'capability'
+                               AND EXISTS (
+                                   SELECT 1 FROM matching_capabilities mc
+                                   WHERE mc.capability_id = pb.grant_id
+                                     AND mc.object_kind = 'resource'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
+                               )
+                               AND (
+                                   pb.scope_kind = 'platform'
+                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
+                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource')
+                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'resource:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
+                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                       SELECT 1 FROM candidate_ancestors ca
+                                       WHERE ca.object_id = c.id
+                                         AND pb.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
+                                   ))
+                               )
+                             )
+                             OR (
+                               pb.grant_kind = 'role'
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM role_grants rg
+                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
+                                   WHERE rg.root_role_id = pb.grant_id
+                                     AND mc.object_kind = 'resource'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
+                                     AND (
+                                         rg.scope_kind = 'platform'
+                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
+                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'resource')
+                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'resource:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
+                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                             SELECT 1 FROM candidate_ancestors ca
+                                             WHERE ca.object_id = c.id
+                                               AND rg.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
+                                         ))
+                                     )
+                               )
+                             )
+                         )
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM effective_access_edges() pb
+                         WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
+                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND pb.effect = 'deny'
+                         AND (
+                             (
+                               pb.grant_kind = 'capability'
+                               AND EXISTS (
+                                   SELECT 1 FROM matching_capabilities mc
+                                   WHERE mc.capability_id = pb.grant_id
+                                     AND mc.object_kind = 'resource'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
+                               )
+                               AND (
+                                   pb.scope_kind = 'platform'
+                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
+                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource')
+                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'resource:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
+                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
+                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                       SELECT 1 FROM candidate_ancestors ca
+                                       WHERE ca.object_id = c.id
+                                         AND pb.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
+                                   ))
+                               )
+                             )
+                             OR (
+                               pb.grant_kind = 'role'
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM role_grants rg
+                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
+                                   WHERE rg.root_role_id = pb.grant_id
+                                     AND mc.object_kind = 'resource'
+                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
+                                     AND (
+                                         rg.scope_kind = 'platform'
+                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
+                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'resource')
+                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'resource:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
+                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
+                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
+                                             SELECT 1 FROM candidate_ancestors ca
+                                             WHERE ca.object_id = c.id
+                                               AND rg.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
+                                         ))
+                                     )
+                               )
+                             )
+                         )
+                   )
+               )
+               SELECT id, COUNT(*) OVER() AS total
+               FROM authorized
+               ORDER BY created_at DESC
+               LIMIT $8 OFFSET $9"#;
+
+    let rows = sqlx::query(sql)
+        .bind(params.subject_id)
+        .bind(params.action)
+        .bind(params.tenant_id)
+        .bind(params.object_type)
+        .bind(q)
+        .bind(params.parent_group_id)
+        .bind(params.include_descendants)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
+
+    rows_to_authorized_object_ids(rows)
+}
+
+fn rows_to_authorized_object_ids(
+    rows: Vec<sqlx::postgres::PgRow>,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    use sqlx::Row;
+
+    let mut total = 0;
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        ids.push(row.try_get("id").map_err(db_err)?);
+        total = row.try_get("total").map_err(db_err)?;
+    }
+    Ok(AuthorizedObjectIdsResponse { ids, total })
+}
+
 pub async fn effective_capabilities(
     pool: &PgPool,
     entity_id: Uuid,
@@ -2368,34 +4134,43 @@ pub async fn effective_capabilities(
     let rows = sqlx::query(
         r#"WITH bindings AS (
              SELECT pb.*, 'direct'::text AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              LEFT JOIN roles r ON pb.grant_kind = 'role' AND r.id = pb.grant_id
              WHERE pb.subject_kind = 'entity' AND pb.subject_id = $1
                AND ($2::uuid IS NULL OR r.tenant_id = $2)
              UNION ALL
              SELECT pb.*, ('group:' || g.name)::text AS via
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              JOIN group_members gm ON gm.group_id = pb.subject_id
              JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
              LEFT JOIN roles r ON pb.grant_kind = 'role' AND r.id = pb.grant_id
              WHERE pb.subject_kind = 'group' AND gm.entity_id = $1
                AND ($2::uuid IS NULL OR g.tenant_id = $2 OR r.tenant_id = $2)
            )
-           SELECT c.id AS capability_id, c.name AS capability_name, c.resource_kind,
+           SELECT c.id AS capability_id, c.name AS capability_name,
                   b.grant_kind, b.grant_id, role.name AS role_name, b.id AS policy_id,
                   b.scope_kind, b.scope_ref, b.effect, b.via
            FROM bindings b
            LEFT JOIN roles role ON b.grant_kind = 'role' AND role.id = b.grant_id
-           LEFT JOIN role_capabilities rc ON b.grant_kind = 'role' AND rc.role_id = b.grant_id
-           JOIN capabilities c ON
+           LEFT JOIN effective_role_actions() rc ON b.grant_kind = 'role' AND rc.role_id = b.grant_id
+           JOIN actions c ON
              (b.grant_kind = 'capability' AND c.id = b.grant_id)
              OR (b.grant_kind = 'role' AND c.id = rc.capability_id)
-           WHERE ($3::text IS NULL OR c.resource_kind = $3 OR c.resource_kind IS NULL)
+           WHERE (
+             $3::text IS NULL
+             OR EXISTS (
+               SELECT 1 FROM action_applicability ca
+               WHERE ca.action_id = c.id
+                 AND ca.object_kind = $3
+                 AND ($4::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $4)
+             )
+           )
            ORDER BY c.name, b.created_at DESC"#,
     )
     .bind(entity_id)
     .bind(params.tenant_id)
-    .bind(params.resource_kind)
+    .bind(params.object_kind)
+    .bind(params.object_type)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -2409,7 +4184,6 @@ pub async fn effective_capabilities(
             .or_insert_with(|| EffectiveCapability {
                 id: cap_id,
                 name: cap_name,
-                resource_kind: row.try_get("resource_kind").unwrap_or(None),
                 sources: Vec::new(),
             });
         let grant_kind: GrantKind = row.try_get("grant_kind").map_err(db_err)?;
@@ -2510,7 +4284,7 @@ pub async fn tenant_ids_for_capability(
                JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
            )
            SELECT DISTINCT pb.scope_ref::uuid
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            WHERE (
                (pb.subject_kind = 'entity' AND pb.subject_id = $1)
                OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM group_paths))
@@ -2520,24 +4294,75 @@ pub async fn tenant_ids_for_capability(
              AND pb.scope_ref IS NOT NULL
              AND (
                (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                   SELECT id FROM capabilities WHERE name = $2 AND resource_kind IS NULL
+                   SELECT id FROM actions WHERE name = $2
                ))
                OR (pb.grant_kind = 'role' AND pb.grant_id IN (
                    SELECT role_id
-                   FROM role_capabilities rc
-                   JOIN capabilities c ON c.id = rc.capability_id
-                   WHERE c.name = $2 AND c.resource_kind IS NULL
+                   FROM effective_role_actions() rc
+                   JOIN actions c ON c.id = rc.capability_id
+                   WHERE c.name = $2
                    UNION
-                   SELECT rcomp.parent_role_id
-                   FROM role_composites rcomp
-                   JOIN role_capabilities rc ON rc.role_id = rcomp.child_role_id
-                   JOIN capabilities c ON c.id = rc.capability_id
-                   WHERE c.name = $2 AND c.resource_kind IS NULL
+                   SELECT NULL::uuid WHERE FALSE
                ))
              )"#,
     )
     .bind(entity_id)
     .bind(capability_name)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn tenant_ids_for_action_on_object_kind(
+    pool: &PgPool,
+    entity_id: Uuid,
+    action_name: &str,
+    object_kind: &str,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"WITH RECURSIVE group_paths(group_id) AS (
+               SELECT gm.group_id
+               FROM group_members gm
+               JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+               WHERE gm.entity_id = $1
+               UNION ALL
+               SELECT gh.parent_id
+               FROM group_hierarchy gh
+               JOIN group_paths gp ON gp.group_id = gh.child_id
+               JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+           )
+           SELECT DISTINCT
+             CASE
+               WHEN pb.scope_kind = 'tenant' THEN pb.scope_ref::uuid
+               ELSE pb.tenant_id
+             END AS tenant_id
+           FROM effective_access_edges() pb
+           WHERE (
+               (pb.subject_kind = 'entity' AND pb.subject_id = $1)
+               OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM group_paths))
+           )
+             AND pb.effect = 'allow'
+             AND (
+               (pb.scope_kind = 'tenant' AND pb.scope_ref IS NOT NULL)
+               OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = $3 AND pb.tenant_id IS NOT NULL)
+             )
+             AND (
+               (pb.grant_kind = 'capability' AND pb.grant_id IN (
+                   SELECT id FROM actions WHERE name = $2
+               ))
+               OR (pb.grant_kind = 'role' AND pb.grant_id IN (
+                   SELECT role_id
+                   FROM effective_role_actions() rc
+                   JOIN actions c ON c.id = rc.capability_id
+                   WHERE c.name = $2
+                   UNION
+                   SELECT NULL::uuid WHERE FALSE
+               ))
+             )"#,
+    )
+    .bind(entity_id)
+    .bind(action_name)
+    .bind(object_kind)
     .fetch_all(pool)
     .await
     .map_err(db_err)
@@ -2552,20 +4377,45 @@ pub async fn orphan_policies(
     let offset = params.offset.max(0);
     let rows = sqlx::query(
         r#"WITH orphaned AS (
-             SELECT pb.*,
+             SELECT ra.id,
+                    ra.tenant_id,
+                    'role_assignment'::text AS source_kind,
+                    ra.subject_kind,
+                    ra.subject_id,
+                    ra.role_id,
+                    NULL::uuid AS permission_block_id,
+                    ra.created_at,
                     CASE
-                      WHEN (pb.subject_kind = 'entity' AND e.id IS NULL)
-                        OR (pb.subject_kind = 'group' AND g.id IS NULL)
+                      WHEN (ra.subject_kind = 'entity' AND e.id IS NULL)
+                        OR (ra.subject_kind = 'group' AND g.id IS NULL)
                       THEN 'subject_not_found'
-                      WHEN (pb.grant_kind = 'capability' AND c.id IS NULL)
-                        OR (pb.grant_kind = 'role' AND r.id IS NULL)
-                      THEN 'grant_not_found'
+                      WHEN r.id IS NULL
+                      THEN 'role_not_found'
                     END AS orphan_reason
-             FROM policy_bindings pb
-             LEFT JOIN entities e ON pb.subject_kind = 'entity' AND pb.subject_id = e.id
-             LEFT JOIN groups g ON pb.subject_kind = 'group' AND pb.subject_id = g.id
-             LEFT JOIN capabilities c ON pb.grant_kind = 'capability' AND pb.grant_id = c.id
-             LEFT JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
+             FROM role_assignments ra
+             LEFT JOIN entities e ON ra.subject_kind = 'entity' AND ra.subject_id = e.id
+             LEFT JOIN principal_groups g ON ra.subject_kind = 'group' AND ra.subject_id = g.id
+             LEFT JOIN roles r ON ra.role_id = r.id
+             UNION ALL
+             SELECT dp.id,
+                    dp.tenant_id,
+                    'direct_policy'::text AS source_kind,
+                    dp.subject_kind,
+                    dp.subject_id,
+                    NULL::uuid AS role_id,
+                    dp.permission_block_id,
+                    dp.created_at,
+                    CASE
+                      WHEN (dp.subject_kind = 'entity' AND e.id IS NULL)
+                        OR (dp.subject_kind = 'group' AND g.id IS NULL)
+                      THEN 'subject_not_found'
+                      WHEN pb.id IS NULL
+                      THEN 'permission_block_not_found'
+                    END AS orphan_reason
+             FROM direct_policies dp
+             LEFT JOIN entities e ON dp.subject_kind = 'entity' AND dp.subject_id = e.id
+             LEFT JOIN principal_groups g ON dp.subject_kind = 'group' AND dp.subject_id = g.id
+             LEFT JOIN permission_blocks pb ON dp.permission_block_id = pb.id
            )
            SELECT * FROM orphaned
            WHERE orphan_reason IS NOT NULL
@@ -2580,18 +4430,28 @@ pub async fn orphan_policies(
     let total: i64 = sqlx::query_scalar(
         r#"WITH orphaned AS (
              SELECT CASE
-                      WHEN (pb.subject_kind = 'entity' AND e.id IS NULL)
-                        OR (pb.subject_kind = 'group' AND g.id IS NULL)
+                      WHEN (ra.subject_kind = 'entity' AND e.id IS NULL)
+                        OR (ra.subject_kind = 'group' AND g.id IS NULL)
                       THEN 'subject_not_found'
-                      WHEN (pb.grant_kind = 'capability' AND c.id IS NULL)
-                        OR (pb.grant_kind = 'role' AND r.id IS NULL)
-                      THEN 'grant_not_found'
+                      WHEN r.id IS NULL
+                      THEN 'role_not_found'
                     END AS orphan_reason
-             FROM policy_bindings pb
-             LEFT JOIN entities e ON pb.subject_kind = 'entity' AND pb.subject_id = e.id
-             LEFT JOIN groups g ON pb.subject_kind = 'group' AND pb.subject_id = g.id
-             LEFT JOIN capabilities c ON pb.grant_kind = 'capability' AND pb.grant_id = c.id
-             LEFT JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
+             FROM role_assignments ra
+             LEFT JOIN entities e ON ra.subject_kind = 'entity' AND ra.subject_id = e.id
+             LEFT JOIN principal_groups g ON ra.subject_kind = 'group' AND ra.subject_id = g.id
+             LEFT JOIN roles r ON ra.role_id = r.id
+             UNION ALL
+             SELECT CASE
+                      WHEN (dp.subject_kind = 'entity' AND e.id IS NULL)
+                        OR (dp.subject_kind = 'group' AND g.id IS NULL)
+                      THEN 'subject_not_found'
+                      WHEN pb.id IS NULL
+                      THEN 'permission_block_not_found'
+                    END AS orphan_reason
+             FROM direct_policies dp
+             LEFT JOIN entities e ON dp.subject_kind = 'entity' AND dp.subject_id = e.id
+             LEFT JOIN principal_groups g ON dp.subject_kind = 'group' AND dp.subject_id = g.id
+             LEFT JOIN permission_blocks pb ON dp.permission_block_id = pb.id
            )
            SELECT COUNT(*) FROM orphaned WHERE orphan_reason IS NOT NULL"#,
     )
@@ -2603,14 +4463,12 @@ pub async fn orphan_policies(
         .map(|row| {
             Ok(OrphanPolicyItem {
                 id: row.try_get("id").map_err(db_err)?,
+                tenant_id: row.try_get("tenant_id").map_err(db_err)?,
+                source_kind: row.try_get("source_kind").map_err(db_err)?,
                 subject_kind: row.try_get("subject_kind").map_err(db_err)?,
                 subject_id: row.try_get("subject_id").map_err(db_err)?,
-                grant_kind: row.try_get("grant_kind").map_err(db_err)?,
-                grant_id: row.try_get("grant_id").map_err(db_err)?,
-                scope_kind: row.try_get("scope_kind").map_err(db_err)?,
-                scope_ref: row.try_get("scope_ref").map_err(db_err)?,
-                effect: row.try_get("effect").map_err(db_err)?,
-                conditions: row.try_get("conditions").map_err(db_err)?,
+                role_id: row.try_get("role_id").map_err(db_err)?,
+                permission_block_id: row.try_get("permission_block_id").map_err(db_err)?,
                 created_at: row.try_get("created_at").map_err(db_err)?,
                 orphan_reason: row.try_get("orphan_reason").map_err(db_err)?,
             })
@@ -2631,19 +4489,19 @@ pub async fn unprotected_resources(
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR kind = $2)
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb
+               SELECT 1 FROM effective_access_edges() pb
                WHERE pb.scope_kind = 'object' AND pb.scope_ref = r.id::text
              )
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb
+               SELECT 1 FROM effective_access_edges() pb
                WHERE pb.scope_kind = 'object_type' AND pb.scope_ref = 'resource:' || r.kind
              )
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb
+               SELECT 1 FROM effective_access_edges() pb
                WHERE pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource'
              )
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb WHERE pb.scope_kind = 'platform'
+               SELECT 1 FROM effective_access_edges() pb WHERE pb.scope_kind = 'platform'
              )
            ORDER BY created_at DESC
            LIMIT $3 OFFSET $4"#,
@@ -2661,19 +4519,19 @@ pub async fn unprotected_resources(
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR kind = $2)
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb
+               SELECT 1 FROM effective_access_edges() pb
                WHERE pb.scope_kind = 'object' AND pb.scope_ref = r.id::text
              )
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb
+               SELECT 1 FROM effective_access_edges() pb
                WHERE pb.scope_kind = 'object_type' AND pb.scope_ref = 'resource:' || r.kind
              )
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb
+               SELECT 1 FROM effective_access_edges() pb
                WHERE pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource'
              )
              AND NOT EXISTS (
-               SELECT 1 FROM policy_bindings pb WHERE pb.scope_kind = 'platform'
+               SELECT 1 FROM effective_access_edges() pb WHERE pb.scope_kind = 'platform'
              )"#,
     )
     .bind(params.tenant_id)
@@ -2767,7 +4625,7 @@ async fn optional_capability_id(
     action: Option<&str>,
 ) -> Result<Option<Uuid>, AppError> {
     match action {
-        Some(name) => sqlx::query_scalar("SELECT id FROM capabilities WHERE name = $1 LIMIT 1")
+        Some(name) => sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
             .bind(name)
             .fetch_optional(pool)
             .await
@@ -2862,7 +4720,7 @@ pub async fn load_bindings_for_entity(
            )
            SELECT pb.id, pb.tenant_id, pb.subject_kind, pb.subject_id, pb.grant_kind, pb.grant_id,
                   pb.scope_kind, pb.scope_ref, pb.effect, pb.conditions, pb.created_at
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            WHERE
              (pb.subject_kind = 'entity' AND pb.subject_id = $1)
              OR
@@ -2886,7 +4744,7 @@ pub async fn capability_ids_for_roles(
 
     use sqlx::Row;
     let rows = sqlx::query(
-        "SELECT role_id, capability_id FROM role_capabilities WHERE role_id = ANY($1::uuid[])",
+        "SELECT role_id, capability_id FROM effective_role_actions() WHERE role_id = ANY($1::uuid[])",
     )
     .bind(role_ids)
     .fetch_all(pool)
@@ -2903,10 +4761,7 @@ pub async fn capability_ids_for_roles(
     Ok(map)
 }
 
-/// Batch-load primitive role grants for direct roles and one-level composite roles.
-/// Returns a map of root role_id → expanded grants. For primitive roles, the root
-/// role is also the grant role. For composite roles, each child primitive role
-/// contributes its own scope and capabilities.
+/// Batch-load role grants from canonical permission blocks.
 pub async fn expanded_role_grants_for_roles(
     pool: &PgPool,
     role_ids: &[Uuid],
@@ -2921,113 +4776,29 @@ pub async fn expanded_role_grants_for_roles(
                   r.id AS role_id,
                   r.name AS role_name,
                   r.name AS role_path,
-                  r.scope_kind,
-                  r.scope_ref,
-                  rc.capability_id
-           FROM roles r
-           JOIN role_capabilities rc ON rc.role_id = r.id
-           WHERE r.id = ANY($1::uuid[])
-           UNION ALL
-           SELECT r.id AS root_role_id,
-                  r.id AS role_id,
-                  r.name AS role_name,
-                  r.name AS role_path,
-                  CASE rpb.applies_to
-                    WHEN 'object_group_type' THEN 'group_object_type'
-                    WHEN 'object_group_tree_type' THEN 'group_tree_object_type'
-                    WHEN 'object_group_child_kind' THEN 'group_child_kind'
-                    WHEN 'object_group_descendant_kind' THEN 'group_descendant_kind'
-                    ELSE rpb.applies_to
+                  CASE
+                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+                    WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+                    ELSE pb.scope_mode
                   END AS scope_kind,
-                  CASE rpb.applies_to
-                    WHEN 'platform' THEN NULL
-                    WHEN 'tenant' THEN rpb.tenant_id::text
-                    WHEN 'object_kind' THEN rpb.object_kind
-                    WHEN 'object_type' THEN
-                      CASE
-                        WHEN rpb.object_type LIKE '%:%' THEN rpb.object_type
-                        ELSE rpb.object_kind || ':' || rpb.object_type
-                      END
-                    WHEN 'object' THEN rpb.object_id::text
-                    WHEN 'object_group_type' THEN
-                      rpb.group_id::text || ':' ||
-                      CASE
-                        WHEN rpb.object_type LIKE '%:%' THEN rpb.object_type
-                        ELSE rpb.object_kind || ':' || rpb.object_type
-                      END
-                    WHEN 'object_group_tree_type' THEN
-                      rpb.group_id::text || ':' ||
-                      CASE
-                        WHEN rpb.object_type LIKE '%:%' THEN rpb.object_type
-                        ELSE rpb.object_kind || ':' || rpb.object_type
-                      END
-                    WHEN 'object_group_child_kind' THEN rpb.group_id::text || ':' || rpb.object_kind
-                    WHEN 'object_group_descendant_kind' THEN rpb.group_id::text || ':' || rpb.object_kind
-                    ELSE NULL
+                  CASE
+                    WHEN pb.scope_mode = 'platform' THEN NULL
+                    WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+                    WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+                    WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+                    WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+                    WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+                    WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+                    WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
                   END AS scope_ref,
-                  rpa.capability_id
+                  pba.action_id AS capability_id
            FROM roles r
            JOIN role_permission_blocks rpb ON rpb.role_id = r.id
-           JOIN role_permission_actions rpa ON rpa.block_id = rpb.id
-           WHERE r.id = ANY($1::uuid[])
-           UNION ALL
-           SELECT parent.id AS root_role_id,
-                  child.id AS role_id,
-                  child.name AS role_name,
-                  parent.name || ' -> ' || child.name AS role_path,
-                  child.scope_kind,
-                  child.scope_ref,
-                  rc.capability_id
-           FROM roles parent
-           JOIN role_composites composite ON composite.parent_role_id = parent.id
-           JOIN roles child ON child.id = composite.child_role_id
-           JOIN role_capabilities rc ON rc.role_id = child.id
-           WHERE parent.id = ANY($1::uuid[])
-           UNION ALL
-           SELECT parent.id AS root_role_id,
-                  child.id AS role_id,
-                  child.name AS role_name,
-                  parent.name || ' -> ' || child.name AS role_path,
-                  CASE rpb.applies_to
-                    WHEN 'object_group_type' THEN 'group_object_type'
-                    WHEN 'object_group_tree_type' THEN 'group_tree_object_type'
-                    WHEN 'object_group_child_kind' THEN 'group_child_kind'
-                    WHEN 'object_group_descendant_kind' THEN 'group_descendant_kind'
-                    ELSE rpb.applies_to
-                  END AS scope_kind,
-                  CASE rpb.applies_to
-                    WHEN 'platform' THEN NULL
-                    WHEN 'tenant' THEN rpb.tenant_id::text
-                    WHEN 'object_kind' THEN rpb.object_kind
-                    WHEN 'object_type' THEN
-                      CASE
-                        WHEN rpb.object_type LIKE '%:%' THEN rpb.object_type
-                        ELSE rpb.object_kind || ':' || rpb.object_type
-                      END
-                    WHEN 'object' THEN rpb.object_id::text
-                    WHEN 'object_group_type' THEN
-                      rpb.group_id::text || ':' ||
-                      CASE
-                        WHEN rpb.object_type LIKE '%:%' THEN rpb.object_type
-                        ELSE rpb.object_kind || ':' || rpb.object_type
-                      END
-                    WHEN 'object_group_tree_type' THEN
-                      rpb.group_id::text || ':' ||
-                      CASE
-                        WHEN rpb.object_type LIKE '%:%' THEN rpb.object_type
-                        ELSE rpb.object_kind || ':' || rpb.object_type
-                      END
-                    WHEN 'object_group_child_kind' THEN rpb.group_id::text || ':' || rpb.object_kind
-                    WHEN 'object_group_descendant_kind' THEN rpb.group_id::text || ':' || rpb.object_kind
-                    ELSE NULL
-                  END AS scope_ref,
-                  rpa.capability_id
-           FROM roles parent
-           JOIN role_composites composite ON composite.parent_role_id = parent.id
-           JOIN roles child ON child.id = composite.child_role_id
-           JOIN role_permission_blocks rpb ON rpb.role_id = child.id
-           JOIN role_permission_actions rpa ON rpa.block_id = rpb.id
-           WHERE parent.id = ANY($1::uuid[])"#,
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           WHERE r.id = ANY($1::uuid[])"#,
     )
     .bind(role_ids)
     .fetch_all(pool)
@@ -3063,12 +4834,12 @@ pub async fn find_capability_ids_by_name(
 ) -> Result<Vec<Uuid>, AppError> {
     sqlx::query_scalar(
         r#"SELECT c.id
-           FROM capabilities c
-           JOIN capability_applicability ca ON ca.capability_id = c.id
+           FROM actions c
+           JOIN action_applicability ca ON ca.action_id = c.id
            WHERE c.name = $1
              AND ca.object_kind = $2
              AND (ca.object_type IS NULL OR ca.object_type = $3)
-           ORDER BY c.resource_kind NULLS LAST, c.id"#,
+           ORDER BY c.id"#,
     )
     .bind(name)
     .bind(object_kind)

@@ -42,8 +42,7 @@ src/
      │                    deny-overrides-allow; unit-tested in #[cfg(test)]
      repo.rs           — sqlx queries; capability_ids_for_roles() batch-loads by role array
 migrations/
-  001_initial.sql      — full schema + capability seeds
-  002_admin_seed.sql   — admin entity (UUID …0001) + admin role (…0002) + binding
+  001_initial.sql      — full schema + action seeds and bootstrap access data
 ```
 
 ## Architecture Patterns
@@ -58,12 +57,28 @@ migrations/
 
 ## Authorization Model (PDP)
 
+Atom's current product model is:
+
+```text
+Action = atomic operation
+Action Applicability = where an action is valid
+Permission Block = scope + actions + effect + conditions
+Role = named collection of Permission Blocks
+Role Assignment = subject gets a Role
+Direct Policy = subject gets one Permission Block directly
+```
+
+Action naming is hybrid:
+- real stored objects use generic actions, for example `read` on `audit_log`, `manage` or `revoke` on `credential`, `create` or `manage` on `tenant`, and `rotate` on `signing_key`;
+- scoped access administration keeps explicit actions: `role.manage` manages roles for a Permission Block scope, and `policy.manage` adds/removes assignments for that scope;
+- operation checks keep operation names such as `authz.check`.
+
 Evaluation order in `authz/engine.rs`:
-1. Load entity (must be active) and resource.
-2. Resolve capability by action name (matched against resource kind or NULL=all).
-3. Load all `policy_bindings` where `subject_id` is the entity directly **or** any group the entity belongs to.
-4. **Batch-load** all role capabilities in a single `ANY($1::uuid[])` query — no per-binding round-trips.
-5. For each binding: check scope, check grant covers the capability (direct cap or via role), evaluate ABAC conditions.
+1. Load entity (must be active) and protected object.
+2. Resolve action by name and validate it through action applicability.
+3. Build effective permissions from role assignments and direct policies, including group inheritance.
+4. Batch-load role permission block actions before the binding loop — no per-binding round-trips.
+5. For each effective permission: check scope, action coverage, and ABAC conditions.
 6. **First DENY match → return denied immediately.**
 7. Any ALLOW match → allowed; otherwise → denied.
 
@@ -77,10 +92,10 @@ Management endpoints are protected by two mechanisms:
 
 **Self-delete check** in `DELETE /entities/:id` — the entity may delete itself; deleting any other entity requires `has_global_manage`.
 
-**Admin bootstrap** — migration `002` seeds:
+**Admin bootstrap** — migration `001_initial.sql` seeds:
 - Entity `00000000-0000-0000-0000-000000000001` (`atom-admin`)
-- Role `00000000-0000-0000-0000-000000000002` (`atom-admin`) with all seeded capabilities
-- Policy binding: admin entity → admin role → scope `all`
+- Role `00000000-0000-0000-0000-000000000002` (`atom-admin`) with all seeded actions
+- Role assignment: admin entity → admin role
 
 Set `ADMIN_SECRET` on first boot to create the password credential for `atom-admin`. Subsequent restarts with the same env var are no-ops (credential already exists). To change the admin password, revoke the old credential via the API, then restart with the new secret.
 
@@ -88,7 +103,7 @@ Set `ADMIN_SECRET` on first boot to create the password credential for `atom-adm
 
 - All PKs are UUIDs (`gen_random_uuid()` via pgcrypto).
 - `entities` and `groups` have a composite unique index on `(name, tenant_id)` — name uniqueness is per-tenant.
-- `capabilities` unique on `(name, resource_kind)` — `resource_kind = NULL` means applies to all kinds.
+- `actions` unique on `name`; `action_applicability` defines valid object kind/type pairs.
 - Migrations run automatically on startup via `sqlx::migrate!("./migrations")`. New migrations go in `migrations/NNN_<name>.sql`.
 - GIN indexes on `attributes` JSONB columns in `entities` and `resources`.
 

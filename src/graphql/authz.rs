@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    authz::{access, engine},
+    authz::{access, engine, repo as authz_repo},
     models::{
-        access as access_model,
+        access::{self as access_model, AuthorizedObjectIdsQuery},
         enums::AuditOutcome,
         policy::{AuthzRequest, AuthzResponse as ModelAuthzResponse},
     },
@@ -14,8 +14,51 @@ use crate::{
 
 use super::{
     auth::{gql_error, require_auth, require_explain_access},
-    types::{parse_id, parse_optional_id, AuthzCheckInput, AuthzExplainResponse, AuthzResponse},
+    types::{
+        parse_id, parse_optional_id, AuthorizedObjectIdList, AuthorizedObjectIdsInput,
+        AuthzCheckInput, AuthzExplainResponse, AuthzResponse,
+    },
 };
+
+#[derive(Default)]
+pub struct AuthzQuery;
+
+#[Object]
+impl AuthzQuery {
+    async fn authorized_object_ids(
+        &self,
+        ctx: &Context<'_>,
+        input: AuthorizedObjectIdsInput,
+    ) -> Result<AuthorizedObjectIdList> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let subject_id = parse_id(input.subject_id, "subjectId")?;
+        let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
+        access::require_authz_check_access(&state.pool, &auth, subject_id, tenant_id)
+            .await
+            .map_err(gql_error)?;
+        let response = authz_repo::authorized_object_ids(
+            &state.pool,
+            AuthorizedObjectIdsQuery {
+                subject_id,
+                action: input.action,
+                object_kind: input.object_kind,
+                object_type: input.object_type,
+                tenant_id,
+                q: input.q,
+                profile_id: None,
+                entity_status: None,
+                parent_group_id: None,
+                include_descendants: false,
+                limit: input.limit.map(i64::from).unwrap_or(100),
+                offset: input.offset.map(i64::from).unwrap_or(0),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(response.into())
+    }
+}
 
 #[derive(Default)]
 pub struct AuthzMutation;

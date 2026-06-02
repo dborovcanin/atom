@@ -112,14 +112,15 @@ async fn audit_tenant_filter(
     auth: &AuthContext,
     requested_tenant_id: Option<Uuid>,
 ) -> Result<Option<Vec<Uuid>>, AppError> {
-    if has_capability_in_scope(pool, auth.entity_id, "audit.read", Scope::Platform).await?
+    if has_capability_in_scope(pool, auth.entity_id, "read", Scope::Platform).await?
         || has_capability_in_scope(pool, auth.entity_id, "manage", Scope::Platform).await?
     {
         return Ok(None);
     }
 
     let mut tenant_ids =
-        repo::tenant_ids_for_capability(pool, auth.entity_id, "audit.read").await?;
+        repo::tenant_ids_for_action_on_object_kind(pool, auth.entity_id, "read", "audit_log")
+            .await?;
     tenant_ids.sort_unstable();
     tenant_ids.dedup();
 

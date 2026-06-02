@@ -18,30 +18,43 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn read_capability_id(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM capabilities WHERE name = 'read' LIMIT 1")
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("read cap")
 }
 
-async fn make_resource(pool: &sqlx::PgPool, kind: &str) -> Uuid {
+async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+        .bind(id)
+        .bind(format!("m1-tenant-{id}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+    id
+}
+
+async fn make_resource(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
         .bind(id)
         .bind(kind)
         .bind(format!("m1-res-{id}"))
+        .bind(tenant_id)
         .execute(pool)
         .await
         .expect("insert resource");
     id
 }
 
-async fn make_active_entity(pool: &sqlx::PgPool, kind: &str) -> Uuid {
+async fn make_active_entity(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
+    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
         .bind(id)
         .bind(kind)
         .bind(format!("m1-ent-{id}"))
+        .bind(tenant_id)
         .execute(pool)
         .await
         .expect("insert entity");
@@ -52,7 +65,7 @@ async fn make_active_entity(pool: &sqlx::PgPool, kind: &str) -> Uuid {
 #[ignore]
 async fn admin_platform_binding_authorises() {
     let p = pool().await;
-    let resource_id = make_resource(&p, "channel").await;
+    let resource_id = make_resource(&p, None, "channel").await;
 
     let req = AuthzRequest {
         subject_id: admin_id(),
@@ -81,16 +94,17 @@ async fn admin_platform_binding_authorises() {
 #[ignore]
 async fn object_type_binding_matches_namespaced_resource_subkind() {
     let p = pool().await;
-    let entity_id = make_active_entity(&p, "service").await;
-    let channel_id = make_resource(&p, "channel").await;
-    let other_id = make_resource(&p, "device_config").await;
+    let tenant_id = make_tenant(&p).await;
+    let entity_id = make_active_entity(&p, Some(tenant_id), "service").await;
+    let channel_id = make_resource(&p, Some(tenant_id), "channel").await;
+    let other_id = make_resource(&p, Some(tenant_id), "device_config").await;
     let read_cap = read_capability_id(&p).await;
 
     // Grant read on every channel via object_type=resource:channel.
     let binding = atom::authz::repo::create_policy(
         &p,
         CreatePolicyBinding {
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             subject_kind: SubjectKind::Entity,
             subject_id: entity_id,
             grant_kind: GrantKind::Capability,
@@ -137,7 +151,7 @@ async fn object_type_binding_matches_namespaced_resource_subkind() {
     );
 
     // Cleanup
-    let _ = sqlx::query("DELETE FROM policy_bindings WHERE id = $1")
+    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
@@ -155,9 +169,9 @@ async fn object_type_binding_matches_namespaced_resource_subkind() {
 #[ignore]
 async fn object_binding_matches_specific_resource_uuid() {
     let p = pool().await;
-    let entity_id = make_active_entity(&p, "service").await;
-    let resource_id = make_resource(&p, "channel").await;
-    let other_id = make_resource(&p, "channel").await;
+    let entity_id = make_active_entity(&p, None, "service").await;
+    let resource_id = make_resource(&p, None, "channel").await;
+    let other_id = make_resource(&p, None, "channel").await;
     let read_cap = read_capability_id(&p).await;
 
     let binding = atom::authz::repo::create_policy(
@@ -207,7 +221,7 @@ async fn object_binding_matches_specific_resource_uuid() {
             .allowed
     );
 
-    let _ = sqlx::query("DELETE FROM policy_bindings WHERE id = $1")
+    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
@@ -225,15 +239,16 @@ async fn object_binding_matches_specific_resource_uuid() {
 #[ignore]
 async fn object_kind_binding_matches_every_resource_kind() {
     let p = pool().await;
-    let entity_id = make_active_entity(&p, "service").await;
-    let chan = make_resource(&p, "channel").await;
-    let cfg = make_resource(&p, "device_config").await;
+    let tenant_id = make_tenant(&p).await;
+    let entity_id = make_active_entity(&p, Some(tenant_id), "service").await;
+    let chan = make_resource(&p, Some(tenant_id), "channel").await;
+    let cfg = make_resource(&p, Some(tenant_id), "rule").await;
     let read_cap = read_capability_id(&p).await;
 
     let binding = atom::authz::repo::create_policy(
         &p,
         CreatePolicyBinding {
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             subject_kind: SubjectKind::Entity,
             subject_id: entity_id,
             grant_kind: GrantKind::Capability,
@@ -266,7 +281,7 @@ async fn object_kind_binding_matches_every_resource_kind() {
         );
     }
 
-    let _ = sqlx::query("DELETE FROM policy_bindings WHERE id = $1")
+    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;

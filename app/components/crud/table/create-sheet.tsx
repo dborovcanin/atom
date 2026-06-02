@@ -1,8 +1,12 @@
 import type { FormEvent } from "react";
-import { CapabilityCreateForm } from "@/components/capabilities/capability-create-form";
+import {
+  CapabilityActionCreateForm,
+  CapabilityApplicabilityCreateForm,
+} from "@/components/capabilities/capability-create-form";
 import { FallbackCreateForm } from "@/components/crud/table/quick-create-form";
 import { singularize } from "@/components/crud/table/utils";
 import { EntityCreateForm } from "@/components/entities/entity-create-form";
+import { PermissionBlockCreateForm } from "@/components/permission-blocks/permission-block-create-form";
 import { PolicyCreateForm } from "@/components/policy/policy-create-form";
 import { ProfileCreateForm } from "@/components/profiles/profile-create-form";
 import { ResourceCreateForm } from "@/components/resources/resource-create-form";
@@ -73,8 +77,20 @@ export function CrudCreateSheet({
               onSaved={onRefresh}
             />
           ) : null}
+          {resource.key === "permission-blocks" ? (
+            <PermissionBlockCreateForm
+              onCancel={() => onOpenChange(false)}
+              onSaved={onRefresh}
+            />
+          ) : null}
+          {resource.key === "capability-actions" ? (
+            <CapabilityActionCreateForm
+              onCancel={() => onOpenChange(false)}
+              onSaved={onRefresh}
+            />
+          ) : null}
           {resource.key === "capabilities" ? (
-            <CapabilityCreateForm
+            <CapabilityApplicabilityCreateForm
               onCancel={() => onOpenChange(false)}
               onSaved={onRefresh}
             />
@@ -106,6 +122,8 @@ function usesFallbackCreateForm(resourceKey: string) {
     "tenants",
     "resources",
     "roles",
+    "permission-blocks",
+    "capability-actions",
     "capabilities",
     "policies",
   ].includes(resourceKey);

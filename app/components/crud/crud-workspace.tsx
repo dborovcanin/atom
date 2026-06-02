@@ -48,6 +48,13 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
   if (resource.listQuery) {
     const variables: Record<string, unknown> = { limit, offset };
     if (tenantId && resource.tenantFilter) variables.tenantId = tenantId;
+    for (const filter of resource.filters ?? []) {
+      const raw = searchParams[`${resourceKey}.${filter.key}`];
+      const value = Array.isArray(raw) ? raw[0] : raw;
+      if (value && value !== "all") {
+        variables[filter.variable ?? filter.key] = value;
+      }
+    }
 
     try {
       const data = await graphqlServer<

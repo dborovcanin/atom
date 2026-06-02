@@ -39,8 +39,6 @@ pub struct ResourceSummary {
 pub struct CapabilitySummary {
     pub id: Uuid,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resource_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +133,6 @@ pub struct GroupAccessResponse {
 pub struct ExplainCapability {
     pub id: Uuid,
     pub name: String,
-    pub resource_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,6 +185,30 @@ pub struct BulkAuthzResult {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AuthorizedObjectIdsQuery {
+    pub subject_id: Uuid,
+    pub action: String,
+    pub object_kind: String,
+    pub object_type: Option<String>,
+    pub tenant_id: Option<Uuid>,
+    pub q: Option<String>,
+    pub profile_id: Option<Uuid>,
+    pub entity_status: Option<EntityStatus>,
+    pub parent_group_id: Option<Uuid>,
+    pub include_descendants: bool,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthorizedObjectIdsResponse {
+    pub ids: Vec<Uuid>,
+    pub total: i64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AccessQuery {
     pub tenant_id: Option<Uuid>,
     pub resource_kind: Option<String>,
@@ -234,7 +255,8 @@ pub struct GroupAccessQuery {
 #[derive(Debug, Deserialize)]
 pub struct EffectiveCapabilitiesQuery {
     pub tenant_id: Option<Uuid>,
-    pub resource_kind: Option<String>,
+    pub object_kind: Option<String>,
+    pub object_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -253,7 +275,6 @@ pub struct CapabilitySource {
 pub struct EffectiveCapability {
     pub id: Uuid,
     pub name: String,
-    pub resource_kind: Option<String>,
     pub sources: Vec<CapabilitySource>,
 }
 
@@ -390,14 +411,12 @@ pub struct ExpiringCredentialsQuery {
 #[derive(Debug, Serialize)]
 pub struct OrphanPolicyItem {
     pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub source_kind: String,
     pub subject_kind: SubjectKind,
     pub subject_id: Uuid,
-    pub grant_kind: GrantKind,
-    pub grant_id: Uuid,
-    pub scope_kind: ScopeKind,
-    pub scope_ref: Option<String>,
-    pub effect: Effect,
-    pub conditions: Value,
+    pub role_id: Option<Uuid>,
+    pub permission_block_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub orphan_reason: String,
 }

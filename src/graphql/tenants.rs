@@ -236,10 +236,7 @@ impl TenantMutation {
         require_any_capability(
             &state.pool,
             auth.entity_id,
-            &[
-                ("tenant.manage", Scope::Platform),
-                ("tenant.create", Scope::Platform),
-            ],
+            &[("manage", Scope::Platform), ("create", Scope::Platform)],
         )
         .await?;
 
@@ -273,7 +270,7 @@ impl TenantMutation {
             &state.pool,
             auth.entity_id,
             &[
-                ("tenant.manage", Scope::Platform),
+                ("manage", Scope::Platform),
                 ("manage", Scope::Tenant(tenant_id)),
             ],
         )
@@ -299,14 +296,9 @@ impl TenantMutation {
     async fn delete_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(
-            &state.pool,
-            auth.entity_id,
-            "tenant.manage",
-            Scope::Platform,
-        )
-        .await
-        .map_err(gql_error)?;
+        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
 
         tenant_repo::change_tenant_status(
             &state.pool,
@@ -475,14 +467,9 @@ impl TenantMutation {
 async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -> Result<Tenant> {
     let auth = require_auth(ctx)?;
     let state = ctx.data::<AppState>()?;
-    require_capability(
-        &state.pool,
-        auth.entity_id,
-        "tenant.manage",
-        Scope::Platform,
-    )
-    .await
-    .map_err(gql_error)?;
+    require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+        .await
+        .map_err(gql_error)?;
 
     let tenant = tenant_repo::change_tenant_status(
         &state.pool,
@@ -497,7 +484,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
 }
 
 async fn can_list_all_tenants(pool: &sqlx::PgPool, entity_id: uuid::Uuid) -> Result<bool> {
-    for capability in ["list", "read", "manage"] {
+    for capability in ["read", "manage"] {
         if has_capability_in_scope(pool, entity_id, capability, Scope::Platform)
             .await
             .map_err(gql_error)?

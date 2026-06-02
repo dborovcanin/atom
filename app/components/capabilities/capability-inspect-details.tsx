@@ -42,17 +42,39 @@ export function CapabilityInspectDetails({ row }: { row: Row | null }) {
         </div>
       </Field>
 
-      {row.name ? (
-        <Field label="Name">
+      {row.actionName || row.capabilityName ? (
+        <Field label="action_name">
+          <span className="text-sm">
+            {String(row.actionName ?? row.capabilityName)}
+          </span>
+        </Field>
+      ) : row.name ? (
+        <Field label="name">
           <span className="text-sm">{String(row.name)}</span>
         </Field>
       ) : null}
 
-      <Field label="Resource kind">
-        <span className="font-mono text-xs">
-          {row.resourceKind ? String(row.resourceKind) : "—"}
-        </span>
-      </Field>
+      {row.actionId || row.capabilityId ? (
+        <Field label="action_id">
+          <span className="break-all font-mono text-xs">
+            {String(row.actionId ?? row.capabilityId)}
+          </span>
+        </Field>
+      ) : null}
+
+      {row.objectKind ? (
+        <Field label="object_kind">
+          <span className="font-mono text-xs">{String(row.objectKind)}</span>
+        </Field>
+      ) : null}
+
+      {row.objectType !== undefined ? (
+        <Field label="object_type">
+          <span className="font-mono text-xs">
+            {row.objectType ? String(row.objectType) : "NULL"}
+          </span>
+        </Field>
+      ) : null}
 
       {row.description ? (
         <Field label="Description">

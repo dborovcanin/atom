@@ -67,7 +67,7 @@ pub async fn add_authenticated_user_membership_in_tx(
     entity_id: Uuid,
 ) -> Result<(), AppError> {
     sqlx::query(
-        r#"INSERT INTO group_members (group_id, entity_id)
+        r#"INSERT INTO principal_group_members (group_id, entity_id)
            VALUES ($1, $2)
            ON CONFLICT DO NOTHING"#,
     )
@@ -93,6 +93,24 @@ pub async fn get_entity(pool: &PgPool, id: Uuid) -> Result<Entity, AppError> {
         sqlx::Error::RowNotFound => AppError::not_found(format!("entity {id} not found")),
         other => AppError::Database(other),
     })
+}
+
+pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Entity>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, Entity>(
+        r#"SELECT id, kind, name, tenant_id, profile_id, profile_version_id,
+                  status, attributes, created_at, updated_at
+           FROM entities
+           WHERE id = ANY($1::uuid[])
+           ORDER BY array_position($1::uuid[], id)"#,
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
 pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<EntityList, AppError> {
@@ -288,7 +306,7 @@ async fn set_entity_parent_group_in_tx(
         ));
     }
     sqlx::query(
-        r#"INSERT INTO group_entity_parents (group_id, entity_id, tenant_id)
+        r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id)
            VALUES ($1, $2, $3)
            ON CONFLICT (entity_id) DO UPDATE
            SET group_id = EXCLUDED.group_id,
@@ -308,7 +326,7 @@ async fn clear_entity_parent_group_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM group_entity_parents WHERE entity_id = $1")
+    sqlx::query("DELETE FROM object_group_entities WHERE entity_id = $1")
         .bind(entity_id)
         .execute(&mut **tx)
         .await
@@ -518,23 +536,75 @@ pub async fn revoke_session(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
 pub async fn create_group(pool: &PgPool, req: CreateGroup) -> Result<Group, AppError> {
     let id = req.id.unwrap_or_else(Uuid::new_v4);
     let attrs = normalize_attributes(req.attributes);
-    let group_type = req.group_type.unwrap_or_else(|| "object".to_string());
-    sqlx::query_as::<_, Group>(
-        r#"INSERT INTO groups (id, name, tenant_id, group_type, description, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, name, tenant_id, group_type, description,
-                     NULL::uuid AS parent_id,
-                     status, attributes, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.tenant_id)
-    .bind(group_type)
-    .bind(req.description)
-    .bind(attrs)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)
+    let group_type = req.group_type.unwrap_or_else(|| "both".to_string());
+    match group_type.as_str() {
+        "principal" => sqlx::query_as::<_, Group>(
+            r#"INSERT INTO principal_groups (id, name, tenant_id, description, attributes)
+                   VALUES ($1, $2, $3, $4, $5)
+                   RETURNING id, name, tenant_id, 'principal'::text AS group_type, description,
+                             NULL::uuid AS parent_id,
+                             status, attributes, created_at, updated_at"#,
+        )
+        .bind(id)
+        .bind(req.name)
+        .bind(req.tenant_id)
+        .bind(req.description)
+        .bind(attrs)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err),
+        "object" => sqlx::query_as::<_, Group>(
+            r#"INSERT INTO object_groups (id, name, tenant_id, description, attributes)
+                   VALUES ($1, $2, $3, $4, $5)
+                   RETURNING id, name, tenant_id, 'object'::text AS group_type, description,
+                             NULL::uuid AS parent_id,
+                             status, attributes, created_at, updated_at"#,
+        )
+        .bind(id)
+        .bind(req.name)
+        .bind(req.tenant_id)
+        .bind(req.description)
+        .bind(attrs)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err),
+        "both" => {
+            let mut tx = pool.begin().await.map_err(db_err)?;
+            sqlx::query(
+                r#"INSERT INTO principal_groups (id, name, tenant_id, description, attributes)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+            )
+            .bind(id)
+            .bind(&req.name)
+            .bind(req.tenant_id)
+            .bind(&req.description)
+            .bind(&attrs)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+            let group = sqlx::query_as::<_, Group>(
+                r#"INSERT INTO object_groups (id, name, tenant_id, description, attributes)
+                   VALUES ($1, $2, $3, $4, $5)
+                   RETURNING id, name, tenant_id, 'object'::text AS group_type, description,
+                             NULL::uuid AS parent_id,
+                             status, attributes, created_at, updated_at"#,
+            )
+            .bind(id)
+            .bind(req.name)
+            .bind(req.tenant_id)
+            .bind(req.description)
+            .bind(attrs)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            tx.commit().await.map_err(db_err)?;
+            Ok(group)
+        }
+        other => Err(AppError::bad_request(format!(
+            "unsupported group type '{other}'"
+        ))),
+    }
 }
 
 pub async fn get_group(pool: &PgPool, id: Uuid) -> Result<Group, AppError> {
@@ -614,16 +684,33 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
 pub async fn update_group(pool: &PgPool, id: Uuid, req: UpdateGroup) -> Result<Group, AppError> {
     let attributes = req.attributes.map(normalize_attributes);
     sqlx::query_as::<_, Group>(
-        r#"UPDATE groups
-           SET name        = COALESCE($2, name),
-               description = COALESCE($3, description),
-               status      = COALESCE($4, status),
-               attributes  = COALESCE($5, attributes),
-               updated_at  = now()
-           WHERE id = $1
-           RETURNING id, name, tenant_id, group_type, description,
-                     (SELECT parent_id FROM group_hierarchy WHERE child_id = groups.id) AS parent_id,
-                     status, attributes, created_at, updated_at"#,
+        r#"WITH p AS (
+             UPDATE principal_groups
+             SET name        = COALESCE($2, name),
+                 description = COALESCE($3, description),
+                 status      = COALESCE($4, status),
+                 attributes  = COALESCE($5, attributes),
+                 updated_at  = now()
+             WHERE id = $1
+             RETURNING id, name, tenant_id, 'principal'::text AS group_type, description,
+                       (SELECT parent_id FROM principal_group_hierarchy WHERE child_id = principal_groups.id) AS parent_id,
+                       status, attributes, created_at, updated_at
+           ),
+           o AS (
+             UPDATE object_groups
+             SET name        = COALESCE($2, name),
+                 description = COALESCE($3, description),
+                 status      = COALESCE($4, status),
+                 attributes  = COALESCE($5, attributes),
+                 updated_at  = now()
+             WHERE id = $1
+             RETURNING id, name, tenant_id, 'object'::text AS group_type, description,
+                       (SELECT parent_id FROM object_group_hierarchy WHERE child_id = object_groups.id) AS parent_id,
+                       status, attributes, created_at, updated_at
+           )
+           SELECT * FROM p
+           UNION ALL
+           SELECT * FROM o"#,
     )
     .bind(id)
     .bind(req.name)
@@ -648,7 +735,7 @@ pub async fn set_group_parent(
     }
 
     use sqlx::Row;
-    let child = sqlx::query("SELECT tenant_id FROM groups WHERE id = $1")
+    let child = sqlx::query("SELECT tenant_id, group_type FROM groups WHERE id = $1")
         .bind(child_id)
         .fetch_one(pool)
         .await
@@ -656,7 +743,7 @@ pub async fn set_group_parent(
             sqlx::Error::RowNotFound => AppError::not_found(format!("group {child_id} not found")),
             other => AppError::Database(other),
         })?;
-    let parent = sqlx::query("SELECT tenant_id FROM groups WHERE id = $1")
+    let parent = sqlx::query("SELECT tenant_id, group_type FROM groups WHERE id = $1")
         .bind(parent_id)
         .fetch_one(pool)
         .await
@@ -668,55 +755,97 @@ pub async fn set_group_parent(
         })?;
     let child_tenant_id: Option<Uuid> = child.try_get("tenant_id").unwrap_or(None);
     let parent_tenant_id: Option<Uuid> = parent.try_get("tenant_id").unwrap_or(None);
+    let child_group_type: String = child
+        .try_get("group_type")
+        .unwrap_or_else(|_| "object".into());
+    let parent_group_type: String = parent
+        .try_get("group_type")
+        .unwrap_or_else(|_| "object".into());
     if child_tenant_id != parent_tenant_id {
         return Err(AppError::bad_request(
             "parent and child groups must belong to the same tenant",
         ));
     }
+    if child_group_type != parent_group_type {
+        return Err(AppError::bad_request(
+            "parent and child groups must have the same group type",
+        ));
+    }
+    let hierarchy_table = if child_group_type == "principal" {
+        "principal_group_hierarchy"
+    } else {
+        "object_group_hierarchy"
+    };
 
-    let creates_cycle: bool = sqlx::query_scalar(
+    let creates_cycle_sql = format!(
         r#"WITH RECURSIVE ancestors(id) AS (
-               SELECT parent_id FROM group_hierarchy WHERE child_id = $1
+               SELECT parent_id FROM {hierarchy_table} WHERE child_id = $1
                UNION ALL
                SELECT gh.parent_id
-               FROM group_hierarchy gh
+               FROM {hierarchy_table} gh
                JOIN ancestors a ON gh.child_id = a.id
            )
-           SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)"#,
-    )
-    .bind(parent_id)
-    .bind(child_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+           SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)"#
+    );
+    let creates_cycle: bool = sqlx::query_scalar(&creates_cycle_sql)
+        .bind(parent_id)
+        .bind(child_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
     if creates_cycle {
         return Err(AppError::bad_request("group hierarchy cycle detected"));
     }
 
-    sqlx::query(
-        r#"INSERT INTO group_hierarchy (parent_id, child_id, tenant_id)
+    let upsert_sql = format!(
+        r#"INSERT INTO {hierarchy_table} (parent_id, child_id, tenant_id)
            VALUES ($1, $2, $3)
            ON CONFLICT (child_id) DO UPDATE
            SET parent_id = EXCLUDED.parent_id,
                tenant_id = EXCLUDED.tenant_id,
-               updated_at = now()"#,
-    )
-    .bind(parent_id)
-    .bind(child_id)
-    .bind(child_tenant_id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+               updated_at = now()"#
+    );
+    sqlx::query(&upsert_sql)
+        .bind(parent_id)
+        .bind(child_id)
+        .bind(child_tenant_id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+
+    if child_group_type == "object" {
+        sqlx::query(
+            r#"INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id)
+               SELECT $1, $2, $3
+               WHERE EXISTS (SELECT 1 FROM principal_groups WHERE id = $1)
+                 AND EXISTS (SELECT 1 FROM principal_groups WHERE id = $2)
+               ON CONFLICT (child_id) DO UPDATE
+               SET parent_id = EXCLUDED.parent_id,
+                   tenant_id = EXCLUDED.tenant_id,
+                   updated_at = now()"#,
+        )
+        .bind(parent_id)
+        .bind(child_id)
+        .bind(child_tenant_id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+    }
 
     get_group(pool, child_id).await
 }
 
 pub async fn remove_group_parent(pool: &PgPool, child_id: Uuid) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM group_hierarchy WHERE child_id = $1")
-        .bind(child_id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+    sqlx::query(
+        r#"WITH p AS (
+             DELETE FROM principal_group_hierarchy WHERE child_id = $1
+           )
+           DELETE FROM object_group_hierarchy WHERE child_id = $1"#,
+    )
+    .bind(child_id)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
     Ok(())
 }
 
@@ -742,12 +871,22 @@ pub async fn list_child_groups(
 }
 
 pub async fn delete_group(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM groups WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    let result = sqlx::query(
+        r#"WITH p AS (
+             DELETE FROM principal_groups WHERE id = $1 RETURNING id
+           ),
+           o AS (
+             DELETE FROM object_groups WHERE id = $1 RETURNING id
+           )
+           SELECT id FROM p
+           UNION ALL
+           SELECT id FROM o"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    if result.is_none() {
         return Err(AppError::not_found(format!("group {id} not found")));
     }
     Ok(())
@@ -760,7 +899,7 @@ pub async fn add_group_member(
 ) -> Result<(), AppError> {
     crate::guardrails::validate_group_member(pool, group_id, entity_id).await?;
     sqlx::query(
-        "INSERT INTO group_members (group_id, entity_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
     .bind(group_id)
     .bind(entity_id)
@@ -775,7 +914,7 @@ pub async fn remove_group_member(
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND entity_id = $2")
+    sqlx::query("DELETE FROM principal_group_members WHERE group_id = $1 AND entity_id = $2")
         .bind(group_id)
         .bind(entity_id)
         .execute(pool)
@@ -789,7 +928,7 @@ pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Ent
         r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.profile_id, e.profile_version_id,
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
-           JOIN group_members gm ON gm.entity_id = e.id
+           JOIN principal_group_members gm ON gm.entity_id = e.id
            WHERE gm.group_id = $1
            ORDER BY e.name"#,
     )
@@ -800,7 +939,7 @@ pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Ent
 }
 
 pub async fn get_entity_groups(pool: &PgPool, entity_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT group_id FROM group_members WHERE entity_id = $1")
+    sqlx::query_scalar("SELECT group_id FROM principal_group_members WHERE entity_id = $1")
         .bind(entity_id)
         .fetch_all(pool)
         .await

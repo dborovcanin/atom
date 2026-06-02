@@ -20,7 +20,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn capability_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM capabilities WHERE name = $1 LIMIT 1")
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -216,7 +216,7 @@ async fn tenant_owned_object_kind_policy_is_bounded_by_policy_tenant_id() {
 
 #[tokio::test]
 #[ignore]
-async fn tenant_manage_at_tenant_scope_does_not_satisfy_platform_lifecycle_gate() {
+async fn manage_at_tenant_scope_does_not_satisfy_platform_lifecycle_gate() {
     let p = pool().await;
     let t = tenant(&p).await;
     let actor = entity(&p, None).await;
@@ -225,19 +225,19 @@ async fn tenant_manage_at_tenant_scope_does_not_satisfy_platform_lifecycle_gate(
         &p,
         Some(t),
         actor,
-        "tenant.manage",
+        "manage",
         ScopeKind::Tenant,
         Some(t.to_string()),
     )
     .await;
 
     assert!(
-        !has_capability_in_scope(&p, actor, "tenant.manage", Scope::Platform)
+        !has_capability_in_scope(&p, actor, "manage", Scope::Platform)
             .await
             .expect("platform lifecycle gate")
     );
     assert!(
-        has_capability_in_scope(&p, actor, "tenant.manage", Scope::Tenant(t))
+        has_capability_in_scope(&p, actor, "manage", Scope::Tenant(t))
             .await
             .expect("tenant gate")
     );

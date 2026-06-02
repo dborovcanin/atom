@@ -12,68 +12,99 @@ Built for [Magistrala](https://github.com/absmach/magistrala) IoT platform, but 
 
 - **Identity** — CRUD for any principal type: humans, devices, services, workloads, applications. All are first-class *entities*; no special user class.
 - **Authentication** — password login (JWT), long-lived API keys, session management.
-- **Authorization** — policy-based decision engine (PDP) supporting RBAC, ABAC, and hybrid.
-- **Grouping** — entities belong to groups; policies apply to groups.
+- **Authorization** — actions, permission blocks, roles, role assignments, Direct Policies, and ABAC guardrails.
+- **Grouping** — Object Groups define where access applies; Principal Groups define who receives roles.
 - **Ownership** — parent/child relationships between entities.
 - **Multi-tenancy** — first-class tenants; entities, groups, resources, and roles can be scoped to a tenant. Magistrala domains map directly to Atom tenants.
 
 ---
 
+## Documentation source of truth
+
+This README is the quickstart and orientation document. It should not duplicate the full product specification.
+
+- Product source of truth: [product-docs/PRD.md](product-docs/PRD.md)
+- Access model source of truth: [product-docs/11-access-model-simplification.md](product-docs/11-access-model-simplification.md)
+- Magistrala integration source of truth: [product-docs/10-magistrala-on-atom.md](product-docs/10-magistrala-on-atom.md)
+
+Do not use older terminology such as Capability, Policy Binding, `role_capabilities`, or `scopeKind/scopeRef` as the product model. Atom now uses Actions, Permission Blocks, Roles, Role Assignments, Direct Policies, Principal Groups, and Object Groups.
+
+---
+
 ## Access model in simple words
 
-Atom decides access with four simple ideas:
+Atom’s normal product model uses these ideas:
 
 | Atom word | Simple meaning | Example |
 |-----------|----------------|---------|
-| Capability | One permission key | `read`, `write`, `delete`, `role.manage`, `policy.manage` |
-| Role | A keychain with many capability keys | `tenant-admin` contains `read`, `write`, `delete`, `role.manage`, `policy.manage` |
-| Policy | The assignment that gives a role or capability to someone | `user1` gets `tenant-admin` |
-| Scope | Where that access works | whole platform, one tenant/domain, or one object |
+| Tenant | Top boundary | Magistrala domain `d1` |
+| Action | One action | `read`, `write`, `publish`, `role.manage` |
+| Action Applicability | Which object types support an action | `publish` is valid for channels, not clients |
+| Permission Block | Scope + actions + effect + conditions | channels in Plant-A -> read, publish |
+| Role | Named collection of Permission Blocks | `Plant Operator` bundles client and channel access |
+| Role Assignment | Gives a role to an entity or Principal Group | assign `Plant Operator` to `user1` |
+| Direct Policy | Gives one Permission Block directly to a subject | `client1` can publish to `channel1` |
+| Principal Group | Collection of identities | `Operators` contains `user1`, `user2`, `mg-service` |
+| Object Group | Boundary/container for objects | `Plant-A` contains clients, channels, child groups |
 
-Read a policy as one sentence:
+Action naming is hybrid:
+
+- real stored objects use generic actions, for example `read` on `audit_log`, `manage` or `revoke` on `credential`, `create` or `manage` on `tenant`, and `rotate` on `signing_key`;
+- scoped access administration keeps explicit actions: `role.manage` manages roles for a Permission Block scope, and `policy.manage` adds/removes assignments for that scope;
+- operation checks keep operation names such as `authz.check`.
+
+Read a normal assignment as one sentence:
 
 ```text
-Give <who> this <role/capability> on this <scope>.
+Give <who> this <role>.
 ```
 
 Example:
 
 ```text
-Give user1 the tenant-admin role on domain d1.
+Assign Plant-A Operator to Principal Group Operators.
 ```
 
 That means:
 
 ```text
-user1 can use the tenant-admin capabilities inside domain d1.
+Every entity in Operators receives the permissions defined inside the Plant-A Operator role.
 ```
 
-Roles can have the same name in different tenants, but they are still separate roles.
+The role itself says where access applies:
 
-Example:
+```text
+Role: Plant-A Operator
+Permission: clients in Object Group Plant-A -> read, write
+Permission: channels in Object Group Plant-A -> read, publish, subscribe
+```
+
+Roles can have the same name in different tenants, but they are still separate rows:
 
 ```text
 Tenant d1 has tenant-admin role with role ID role-a.
 Tenant d2 has tenant-admin role with role ID role-b.
 ```
 
-Changing capabilities on `role-a` affects only tenant `d1`. It does not change `role-b` in tenant `d2`.
+Changing actions on `role-a` affects only tenant `d1`. It does not change `role-b` in tenant `d2`.
 
 So `tenant-admin` is not one global shared role. Each tenant gets its own tenant-scoped `tenant-admin` role.
 
-Scope decides how wide the access is:
+Direct Policies exist for advanced/security flows. They attach an existing Permission Block directly to a subject; they do not redefine scope or actions.
 
-- `platform` means the whole Atom system.
-- `tenant` means one tenant/domain.
-- `object` means one exact object, such as one client, channel, group, rule, alarm, or report.
+Normal object listing does not require a separate `list` action. Listing should return objects the caller can `read`, using authorization-aware SQL filtering.
 
 Short version:
 
 ```text
-Capability = permission
-Role       = group of permissions
-Policy     = gives access to user/group
-Scope      = where access applies
+Action             = action
+Action Applicability = valid action/object pair
+Permission Block       = where actions apply
+Role                   = named set of Permission Blocks
+Role Assignment        = who gets the role
+Direct Policy          = who gets one Permission Block directly
+Principal Group        = who
+Object Group           = where
 ```
 
 ---
@@ -165,11 +196,13 @@ Custom API endpoints do not inspect raw Postgres tables, do not change REST or G
 
 The Atom Next UI includes admin workflows for tenants, entities, groups, resources, roles, policies, audit, authz debugging, and custom API endpoints. The GraphQL playground includes starter operations, schema introspection search, variables, response viewing, and copyable curl/fetch snippets.
 
-The GraphQL schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, capabilities, policies, authz checks, audit logs, and profile-driven entity creation. REST remains available and unchanged.
+Atom is GraphQL-first for catalog, authorization, audit, roles, assignments, permission blocks, actions, Principal Groups, and Object Groups.
+
+Public non-GraphQL endpoints are intentionally limited to auth, health, JWKS, and custom API endpoint execution. The full API surface is documented in [product-docs/PRD.md](product-docs/PRD.md).
 
 Atom GraphQL is generic. No Magistrala-specific GraphQL aliases exist; use the generic application mappings below.
 
-GraphQL uses typed enums for Atom's fixed vocabularies, including `EntityKind`, `EntityStatus`, `TenantStatus`, `SubjectKind`, `GrantKind`, `ScopeKind`, `Effect`, `CredentialKind`, and `AuditOutcome`. Inline GraphQL uses enum values without quotes, such as `kind: device` or `scopeKind: object`. When using variables, send the same value as a JSON string, such as `"device"`.
+GraphQL uses typed enums for Atom's fixed vocabularies, including `EntityKind`, `EntityStatus`, `TenantStatus`, `Effect`, `CredentialKind`, and `AuditOutcome`. Inline GraphQL uses enum values without quotes, such as `kind: device`. When using variables, send the same value as a JSON string, such as `"device"`.
 
 Profiles keep Atom's internal runtime/authz kind separate from user/domain subtypes:
 
@@ -235,21 +268,6 @@ mutation {
 }
 
 mutation {
-  createPolicy(input: {
-    subjectKind: entity,
-    subjectId: "client-entity-id",
-    grantKind: capability,
-    grantId: "publish-capability-id",
-    scopeKind: object,
-    scopeRef: "channel-resource-id",
-    effect: allow
-  }) {
-    id
-    effect
-  }
-}
-
-mutation {
   authzCheck(input: {
     subjectId: "client-entity-id",
     action: "publish",
@@ -266,7 +284,8 @@ Generic application mapping:
 - a domain-like app calls `createTenant`
 - a client-like app calls `createEntity` with a device/client profile
 - a channel-like app calls `createResource` with `kind="channel"`
-- a connection-like app calls `createPolicy` over entity subjects and resource objects
+- a connection-like app creates a Permission Block and Direct Policy for the strict subject-to-object grant
+- a role-based app creates Permission Blocks, attaches them to Roles, and assigns Roles to entities or Principal Groups
 
 ---
 
@@ -363,319 +382,206 @@ curl http://localhost:8080/entities/<id> \
 
 ---
 
-## RBAC
+## RBAC And Direct Policies
 
-Role-Based Access Control is the primary authorization model. Roles bundle capabilities and are assigned to entities or groups.
+Role-Based Access Control is the normal product model. A role does not contain scope columns directly. A role links to one or more Permission Blocks, and each Permission Block contains the scope, actions, effect, and optional ABAC conditions.
 
 ### Example: device that can publish to channels
 
-```bash
-# 1. List seeded capabilities to find "publish"
-curl http://localhost:8080/capabilities -H "Authorization: Bearer $TOKEN"
+```text
+Action:
+  publish
 
-# 2. Create a role
-ROLE=$(curl -s -X POST http://localhost:8080/roles \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "channel-publisher"}' | jq -r .id)
+Action Applicability:
+  publish is valid on resource:channel
 
-# 3. Add the "publish" capability to the role
-curl -s -X POST http://localhost:8080/roles/$ROLE/capabilities \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "{\"capability_id\": \"$PUBLISH_CAP_ID\"}"
+Permission Block:
+  tenant_id = d1
+  scope_mode = object_type
+  object_kind = resource
+  object_type = channel
+  effect = allow
+  actions = [publish]
 
-# 4. Bind the role to a device, scoped to all channel resources
-curl -s -X POST http://localhost:8080/policies \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"subject_kind\": \"entity\",
-    \"subject_id\":   \"$DEVICE_ID\",
-    \"grant_kind\":   \"role\",
-    \"grant_id\":     \"$ROLE\",
-    \"scope_kind\":   \"object_type\",
-    \"scope_ref\":    \"resource:channel\",
-    \"effect\":       \"allow\"
-  }"
+Role:
+  channel-publisher
+  permission_blocks = [the publish block]
 
-# 5. Check authorization
-curl -s -X POST http://localhost:8080/authz/check \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"subject_id\":  \"$DEVICE_ID\",
-    \"action\":      \"publish\",
-    \"resource_id\": \"$CHANNEL_ID\"
-  }"
-# → {"allowed": true, "reason": "allowed"}
+Role Assignment:
+  subject = device sensor-001
+  role = channel-publisher
 ```
 
-### Group-based RBAC
+The same runtime link can also be represented as a Direct Policy when a trusted service needs a strict one-off grant:
 
-```bash
-# Create a group and assign the role to it
-curl -X POST http://localhost:8080/groups \
-  -d '{"name": "floor-sensors", "tenant_id": "..."}'
+```text
+Permission Block:
+  tenant_id = d1
+  scope_mode = object
+  object_kind = resource
+  object_type = channel
+  object_id = channel-001
+  effect = allow
+  actions = [publish]
 
-# Add devices to the group
-curl -X POST http://localhost:8080/groups/$GROUP_ID/members \
-  -d "{\"entity_id\": \"$DEVICE_ID\"}"
+Direct Policy:
+  subject = device sensor-001
+  permission_block = the exact-channel publish block
+```
 
-# Bind the role to the group (all group members inherit it)
-curl -X POST http://localhost:8080/policies \
-  -d "{\"subject_kind\": \"group\", \"subject_id\": \"$GROUP_ID\", ...}"
+Direct Policies are advanced/security records. Normal UI should prefer Roles and Role Assignments.
+
+### Principal Groups
+
+Principal Groups are who-containers. A Role Assignment can target a Principal Group, and all members inherit that role.
+
+```text
+Principal Group: floor-sensors
+Members: sensor-001, sensor-002
+Assignment: floor-sensors gets channel-publisher
+```
+
+### Object Groups
+
+Object Groups are where-containers. They do not receive roles. They are used by Permission Blocks to describe where a permission applies.
+
+```text
+Object Group: Plant-A
+Contains: channel-001, sensor-001, child groups
+
+Permission Block:
+  scope_mode = group_direct_objects
+  group_id = Plant-A
+  object_kind = resource
+  object_type = channel
+  actions = [read, publish]
 ```
 
 ---
 
 ## ABAC
 
-Attribute-Based Access Control uses `conditions` on a policy binding. Conditions are a flat JSON object where keys are dot-paths into the evaluation context and values must match exactly (AND logic).
+Attribute-Based Access Control uses `conditions` on Permission Blocks. Conditions are a flat JSON object where keys are dot-paths into the evaluation context and values must match exactly.
 
 The evaluation context is:
+
 ```json
 {
-  "entity":   { "attributes": { ...entity.attributes... } },
-  "resource": { "attributes": { ...resource.attributes... } },
-  "context":  { ...extra fields from the check request... }
+  "entity": { "attributes": { "...": "..." } },
+  "object": { "kind": "resource", "type": "channel", "attributes": { "...": "..." } },
+  "tenant": { "attributes": { "...": "..." } },
+  "context": { "...": "..." }
 }
 ```
 
-### Example: only allow access to resources tagged `env=prod` from trusted IPs
-
-```bash
-# Policy binding with conditions
-curl -X POST http://localhost:8080/policies \
-  -d '{
-    "subject_kind": "entity",
-    "subject_id":   "<svc-id>",
-    "grant_kind":   "capability",
-    "grant_id":     "<read-cap-id>",
-    "scope_kind":   "object_type",
-    "scope_ref":    "resource:secret",
-    "effect":       "allow",
-    "conditions": {
-      "resource.attributes.env":  "prod",
-      "context.ip_trusted":       "true"
-    }
-  }'
-
-# Check — must pass context fields to satisfy conditions
-curl -X POST http://localhost:8080/authz/check \
-  -d '{
-    "subject_id":  "<svc-id>",
-    "action":      "read",
-    "resource_id": "<secret-id>",
-    "context": {
-      "ip_trusted": "true"
-    }
-  }'
-```
-
-### RBAC + ABAC hybrid
-
-Conditions can be layered on any policy binding, including role-based ones. A binding is only considered if all conditions match.
+Conditions can be used in Role Permission Blocks or Direct Policy Permission Blocks. A Permission Block matches only when all conditions match.
 
 ---
 
 ## Authorization Rules
 
-- **DENY overrides ALLOW** — an explicit deny binding wins regardless of allow bindings.
-- **Default DENY** — no matching allow policy means denied.
-- **Group inheritance** — bindings on a group apply to all group members.
-- **Scope** — policies can apply to `all` resources, a specific resource `kind`, or a single `resource` by ID.
+- **DENY overrides ALLOW** — a matching deny Permission Block wins over matching allow blocks.
+- **Default DENY** — no matching allow means denied.
+- **Role Assignment has no scope** — it only says who gets a role.
+- **Direct Policy has no duplicated scope/actions** — it only links a subject to one Permission Block.
+- **Scope lives in Permission Blocks** — this is the single source of truth.
+- **Listing uses read** — ordinary list queries return only objects the caller can `read`.
+- **Listing is DB-filtered** — no fetch-all and PDP-per-row listing.
 
 ---
 
-## API Reference
+## API Surface
 
-### Health
-```
+Atom is GraphQL-first for catalog, authorization, audit, roles, assignments, permission blocks, actions, Principal Groups, and Object Groups.
+
+Public non-GraphQL endpoints are intentionally limited to:
+
+```text
 GET  /health
-```
-
-### Auth
-```
-GET  /auth/public-config
-POST /auth/signup                          {name, email, password, attributes?}
-POST /auth/login                           {identifier, secret, tenant_id? | tenant_route?, kind?}
-GET  /auth/email/verify?token=...
-POST /auth/email/resend                    {email}
-GET  /auth/oauth/:provider/start?return_to=...
-GET  /auth/oauth/:provider/callback
-POST /auth/oauth/exchange                  {code}
+POST /graphql
+GET  /.well-known/jwks.json
+POST /auth/login
 POST /auth/logout
-GET  /auth/sessions/:id
+POST /auth/signup
+POST /auth/introspect
+GET/POST /auth/email/*
+GET/POST /auth/password/reset*
+GET/POST /auth/oauth/*
+POST /auth/keys/rotate
+ANY /api/custom/*
 ```
 
-### Entities
-```
-POST   /entities                           {kind, name, tenant_id?, attributes?}
-GET    /entities?kind=&tenant_id=&status=&limit=&offset=
-GET    /entities/:id
-PUT    /entities/:id                       {name?, status?, attributes?}
-DELETE /entities/:id
+Core access-model APIs should use GraphQL object names:
+
+```text
+Action
+ActionApplicability
+PermissionBlock
+Role
+RoleAssignment
+DirectPolicy
+PrincipalGroup
+ObjectGroup
 ```
 
-Entity `kind` values: `human | device | service | workload | application`
+---
 
-### Credentials
-```
-POST   /entities/:id/credentials/password    {password}
-POST   /entities/:id/credentials/api-keys    {expires_at?, description?}
-GET    /entities/:id/credentials
-DELETE /entities/:entity_id/credentials/:cred_id
-```
+## Tenant Mapping
 
-### Groups & Membership
-```
-POST   /groups                             {name, tenant_id?, description?}
-GET    /groups?tenant_id=&limit=&offset=
-GET    /groups/:id
-DELETE /groups/:id
-POST   /groups/:id/members                 {entity_id}
-GET    /groups/:id/members
-DELETE /groups/:group_id/members/:entity_id
-GET    /entities/:id/groups
+A tenant is an isolation boundary, not a principal. Other rows reference it via `tenant_id` unless they are platform/global rows.
+
+Tenant status values:
+
+```text
+active | inactive | frozen | deleted
 ```
 
-### Ownerships
-```
-POST   /entities/:id/owned                 {owned_id, relation?}
-GET    /entities/:id/owned
-DELETE /entities/:owner_id/owned/:owned_id
-```
+### Magistrala Domain -> Atom Tenant
 
-### Resources
-```
-POST   /resources                          {kind, name?, tenant_id?, owner_id?, attributes?}
-GET    /resources?kind=&tenant_id=&limit=&offset=
-GET    /resources/:id
-PUT    /resources/:id                      {name?, attributes?}
-DELETE /resources/:id
-```
+| Magistrala field | Atom field |
+|---|---|
+| domain `id` | `tenants.id` |
+| domain `name` | `tenants.name` |
+| `route` | `tenants.route` |
+| `metadata` | `tenants.attributes` |
+| `tags` | `tenants.tags` |
+| `enabled` | `status = active` |
+| `disabled` | `status = inactive` |
+| `freezed` | `status = frozen` |
+| `deleted` | `status = deleted` |
 
-### Tenants
-```
-POST   /tenants                            {name, route?, tags?, attributes?}     # tenant.manage at platform scope
-GET    /tenants?name=&route=&status=&limit=&offset=
-GET    /tenants/:id
-PUT    /tenants/:id                        {name?, route?, tags?, attributes?}    # RequireManage
-POST   /tenants/:id/enable                                                        # RequireManage → status=active
-POST   /tenants/:id/disable                                                       # RequireManage → status=inactive
-POST   /tenants/:id/freeze                                                        # RequireManage → status=frozen
-DELETE /tenants/:id                                                               # RequireManage → status=deleted (soft)
-```
-
-A tenant is an isolation boundary, not a principal. Other rows
-reference it via `tenant_id` (NULL for platform/global objects).
-Tenant status values: `active | inactive | frozen | deleted`.
-
-#### Magistrala Domain → Atom Tenant mapping
-
-| Magistrala field | Atom field          |
-|------------------|---------------------|
-| domain `id`      | `tenants.id`        |
-| domain `name`    | `tenants.name`      |
-| `route`          | `tenants.route`     |
-| `metadata`       | `tenants.attributes`|
-| `tags`           | `tenants.tags`      |
-| `enabled`        | `status = active`   |
-| `disabled`       | `status = inactive` |
-| `freezed`        | `status = frozen`   |
-| `deleted`        | `status = deleted`  |
-
-Reuse the Magistrala domain UUID as the Atom `tenants.id`. All Atom
-objects in that domain (entities, groups, resources, roles) carry
-the same UUID in their `tenant_id` column.
-
-### Roles
-```
-POST   /roles                              {name, tenant_id?, description?}
-GET    /roles?tenant_id=&limit=&offset=
-GET    /roles/:id
-DELETE /roles/:id
-POST   /roles/:id/capabilities             {capability_id}
-GET    /roles/:id/capabilities
-DELETE /roles/:role_id/capabilities/:cap_id
-```
-
-### Capabilities
-```
-POST   /capabilities                       {name, resource_kind?, description?}
-GET    /capabilities?resource_kind=
-GET    /capabilities/:id
-DELETE /capabilities/:id
-```
-
-Seeded defaults (apply to all resource kinds): `read, write, delete, publish, subscribe, execute, manage`
-
-### Policy Bindings
-```
-POST   /policies                           {subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref?, effect?, conditions?}
-GET    /policies?subject_id=&subject_kind=&limit=&offset=
-GET    /policies/:id
-DELETE /policies/:id
-```
-
-### Authorization Check
-```
-POST /authz/check
-{
-  "subject_id":  "uuid",
-  "action":      "publish",
-  "resource_id": "uuid",
-  "context":     {}
-}
-→ {"allowed": true, "reason": "allowed"}
-```
-
-The protected object can also be addressed explicitly via
-`object_kind` + `object_id`. This is required for non-resource
-objects such as tenants:
-
-```
-POST /authz/check
-{
-  "subject_id":  "uuid",
-  "action":      "manage",
-  "object_kind": "tenant",
-  "object_id":   "uuid",
-  "context":     {}
-}
-```
-
-Supported `object_kind` values: `resource`, `tenant`. When
-`object_kind`/`object_id` are supplied they win over `resource_id`;
-otherwise the legacy `resource_id` form is used unchanged.
-
-Policy bindings apply against tenant objects with canonical scopes:
-
-- `scope_kind = platform` — covers every protected object including tenants.
-- `scope_kind = object_type`, `scope_ref = "tenant"` — covers all tenants.
-- `scope_kind = object`, `scope_ref = <tenant UUID>` — covers one tenant.
+Reuse the Magistrala domain UUID as the Atom `tenants.id`. Objects in that domain carry the same UUID in their `tenant_id` column.
 
 ---
 
 ## Data Model Summary
 
 ```
-Tenant ─── isolation boundary; tenant_id on Entity, Group, Resource, Role
-       ─── status: active | inactive | frozen | deleted
+Tenant ─── isolation boundary; tenant_id on tenant-owned rows
 
-Entity ─── has many ─── Credentials (password, api_key, certificate)
-Entity ─── has many ─── Sessions
-Entity ─── member of ── Groups
-Entity ─── owns ──────── Entities (via Ownerships)
+Entity ─── identity: human | device | service | workload | application
+Entity ─── has credentials and sessions
 
-PolicyBinding ─── subject: Entity | Group
-              ─── grant:   Capability | Role
-              ─── scope:   platform | tenant | object_kind | object_type | object
-              ─── effect:  allow | deny
-              ─── conditions: ABAC dot-path map
+Action ─── atomic operation: read | write | publish | ...
+Action Applicability ─── says which object kinds/types support an action
 
-Role ─── has many ─── Capabilities
+PermissionBlock ─── tenant_id
+                ─── scope_mode + object_kind/object_type/object_id/group_id
+                ─── effect: allow | deny
+                ─── conditions
+                ─── has many Actions
+
+Role ─── tenant-owned metadata
+     ─── has many PermissionBlocks
+
+RoleAssignment ─── subject: Entity | PrincipalGroup
+               ─── role: Role
+
+DirectPolicy ─── subject: Entity | PrincipalGroup
+             ─── permission_block: PermissionBlock
+
+PrincipalGroup ─── who-container; has members
+ObjectGroup ─── where-container; contains entities/resources/child groups
 ```
 
 ---

@@ -1,4 +1,4 @@
-import { CapabilityCreateForm } from "@/components/capabilities/capability-create-form";
+import { CapabilityApplicabilityCreateForm } from "@/components/capabilities/capability-create-form";
 import {
   capabilityFormInitialValues,
   entityFormInitialValues,
@@ -224,7 +224,7 @@ export function CrudEditSheets({
               {`Edit ${String(editing.role?.name ?? editing.role?.id ?? "role")}`}
             </SheetTitle>
             <SheetDescription>
-              Update this role&apos;s name, description, and capabilities.
+              Update this role&apos;s name, description, and actions.
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-4">
@@ -252,16 +252,15 @@ export function CrudEditSheets({
         <SheetContent className="w-full overflow-y-auto sm:max-w-md!">
           <SheetHeader>
             <SheetTitle>
-              {`Edit ${String(editing.capability?.name ?? editing.capability?.id ?? "capability")}`}
+              {`Edit ${String(editing.capability?.actionName ?? editing.capability?.name ?? editing.capability?.id ?? "action applicability")}`}
             </SheetTitle>
             <SheetDescription>
-              Update this capability&apos;s name, resource kind, and
-              description.
+              Update this action applicability row.
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-4">
             {editing.capability ? (
-              <CapabilityCreateForm
+              <CapabilityApplicabilityCreateForm
                 key={String(editing.capability.id)}
                 capability={capabilityFormInitialValues(editing.capability)}
                 onCancel={() => setters.setCapability(null)}
@@ -285,8 +284,8 @@ export function CrudEditSheets({
           <SheetHeader>
             <SheetTitle>Edit policy binding</SheetTitle>
             <SheetDescription>
-              Modify this binding. The existing record will be replaced with the
-              new one.
+              Replace this direct policy with a new subject-to-permission-block
+              grant.
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-4">
@@ -295,17 +294,15 @@ export function CrudEditSheets({
                 key={String(editing.policy.id)}
                 initialPolicy={{
                   id: String(editing.policy.id ?? ""),
-                  effect: String(editing.policy.effect ?? "allow"),
+                  tenantId:
+                    editing.policy.tenantId != null
+                      ? String(editing.policy.tenantId)
+                      : null,
                   subjectKind: String(editing.policy.subjectKind ?? "entity"),
                   subjectId: String(editing.policy.subjectId ?? ""),
-                  grantKind: String(editing.policy.grantKind ?? "capability"),
-                  grantId: String(editing.policy.grantId ?? ""),
-                  scopeKind: String(editing.policy.scopeKind ?? "platform"),
-                  scopeRef:
-                    editing.policy.scopeRef != null
-                      ? String(editing.policy.scopeRef)
-                      : null,
-                  conditions: editing.policy.conditions,
+                  permissionBlockId: String(
+                    editing.policy.permissionBlockId ?? "",
+                  ),
                 }}
                 onCancel={() => setters.setPolicy(null)}
                 onSaved={() => {

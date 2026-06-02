@@ -127,7 +127,7 @@ async fn add_and_remove_group_member() {
         .execute(authed(format!(
             r#"
             mutation {{
-              createGroup(input: {{ name: "{name}" }}) {{
+              createPrincipalGroup(input: {{ name: "{name}" }}) {{
                 id
               }}
             }}
@@ -135,7 +135,7 @@ async fn add_and_remove_group_member() {
         )))
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
-    let group_id = created.data.into_json().expect("json data")["createGroup"]["id"]
+    let group_id = created.data.into_json().expect("json data")["createPrincipalGroup"]["id"]
         .as_str()
         .expect("group id")
         .to_owned();

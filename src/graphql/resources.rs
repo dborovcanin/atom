@@ -3,16 +3,16 @@ use async_graphql::{Context, Object, Result, ID};
 use crate::{
     authz::{engine, repo as authz_repo},
     models::{
+        access::AuthorizedObjectIdsQuery,
         policy::AuthzRequest,
-        resource::{CreateResource, ListResources, UpdateResource},
+        resource::{CreateResource, UpdateResource},
     },
     state::AppState,
 };
 
 use super::{
     auth::{
-        gql_error, require_any_capability, require_auth, require_list_access, require_read_access,
-        scope_for_tenant,
+        gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
     },
     types::{
         parse_id, parse_optional_id, CreateResourceInput, Resource, ResourceList,
@@ -41,15 +41,24 @@ impl ResourceQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         let parent_group_id = parse_optional_id(parent_group_id, "parentGroupId")?;
-        if parent_group_id.is_none() {
-            require_list_access(&state.pool, auth.entity_id, tenant_id).await?;
-        }
-        let list = authz_repo::list_resources(
+        let object_type = kind.as_deref().map(|kind| {
+            if kind.contains(':') {
+                kind.to_string()
+            } else {
+                format!("resource:{kind}")
+            }
+        });
+        let authorized = authz_repo::authorized_object_ids(
             &state.pool,
-            ListResources {
-                q,
-                kind,
+            AuthorizedObjectIdsQuery {
+                subject_id: auth.entity_id,
+                action: "read".to_string(),
+                object_kind: "resource".to_string(),
+                object_type,
                 tenant_id,
+                q,
+                profile_id: None,
+                entity_status: None,
                 parent_group_id,
                 include_descendants: include_descendants.unwrap_or(false),
                 limit: limit.map(i64::from).unwrap_or(20),
@@ -58,37 +67,13 @@ impl ResourceQuery {
         )
         .await
         .map_err(gql_error)?;
-        if parent_group_id.is_some() {
-            let mut authorized = Vec::new();
-            for item in list.items {
-                let allowed = engine::evaluate(
-                    &state.pool,
-                    &AuthzRequest {
-                        subject_id: auth.entity_id,
-                        action: "read".to_string(),
-                        resource_id: None,
-                        object_kind: Some("resource".to_string()),
-                        object_id: Some(item.id),
-                        context: serde_json::Value::Null,
-                    },
-                )
-                .await
-                .map_err(gql_error)?
-                .allowed;
-                if allowed {
-                    authorized.push(Resource::from(item));
-                }
-            }
-            let total = authorized.len() as i64;
-            return Ok(ResourceList {
-                items: authorized,
-                total,
-            });
-        }
+        let items = authz_repo::list_resources_by_ids(&state.pool, &authorized.ids)
+            .await
+            .map_err(gql_error)?;
 
         Ok(ResourceList {
-            items: list.items.into_iter().map(Resource::from).collect(),
-            total: list.total,
+            items: items.into_iter().map(Resource::from).collect(),
+            total: authorized.total,
         })
     }
 

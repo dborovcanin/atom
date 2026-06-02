@@ -104,12 +104,12 @@ async fn channel(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn seeded_capability(pool: &PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM capabilities WHERE name = $1 LIMIT 1")
+async fn seeded_action(pool: &PgPool, name: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
-        .expect("seeded capability")
+        .expect("seeded action")
 }
 
 async fn tenant(pool: &PgPool) -> Uuid {
@@ -140,13 +140,15 @@ async fn tenant_entity(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
 
 async fn tenant_group(pool: &PgPool, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO groups (id, name, tenant_id, attributes) VALUES ($1, $2, $3, '{}')")
-        .bind(id)
-        .bind(format!("graphql-group-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert group");
+    sqlx::query(
+        "INSERT INTO principal_groups (id, name, tenant_id, attributes) VALUES ($1, $2, $3, '{}')",
+    )
+    .bind(id)
+    .bind(format!("graphql-group-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert group");
     id
 }
 
@@ -154,27 +156,63 @@ async fn scoped_role(
     pool: &PgPool,
     tenant_id: Uuid,
     name: &str,
-    scope_kind: &str,
-    scope_ref: &str,
+    _scope_kind: &str,
+    _scope_ref: &str,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO roles (id, name, tenant_id, scope_kind, scope_ref) VALUES ($1, $2, $3, $4, $5)",
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(format!("{name}-{id}"))
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("insert role");
+    id
+}
+
+async fn attach_role_action(
+    pool: &PgPool,
+    role_id: Uuid,
+    tenant_id: Uuid,
+    object_id: Uuid,
+    object_kind: &str,
+    action_id: Uuid,
+) {
+    let block_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks
+           (tenant_id, scope_mode, object_kind, object_id, effect)
+         VALUES ($1, 'object', $2, $3, 'allow')
+         RETURNING id",
     )
-    .bind(id)
-    .bind(format!("{name}-{id}"))
     .bind(tenant_id)
-    .bind(scope_kind)
-    .bind(scope_ref)
+    .bind(object_kind)
+    .bind(object_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert permission block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id)
+         VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(action_id)
     .execute(pool)
     .await
-    .expect("insert role");
-    id
+    .expect("insert permission block action");
+    sqlx::query(
+        "INSERT INTO role_permission_blocks (role_id, permission_block_id)
+         VALUES ($1, $2)",
+    )
+    .bind(role_id)
+    .bind(block_id)
+    .execute(pool)
+    .await
+    .expect("insert role permission block");
 }
 
 #[tokio::test]
 #[ignore]
-async fn create_capability_and_list_it() {
+async fn create_action_and_list_it() {
     let pool = common::pool().await;
     let schema = build_schema(state(pool));
     let name = format!("graphql-cap-{}", Uuid::new_v4());
@@ -183,35 +221,36 @@ async fn create_capability_and_list_it() {
         .execute(authed(format!(
             r#"
             mutation {{
-              createCapability(input: {{
+              createAction(input: {{
                 name: "{name}",
-                resourceKind: "channel",
-                description: "GraphQL capability"
+                description: "GraphQL action",
+                applicability: [{{ objectKind: "resource", objectType: "resource:channel" }}]
               }}) {{
                 id
                 name
-                resourceKind
                 description
+                applicability {{ objectKind objectType }}
               }}
             }}
             "#
         )))
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
-    let capability = &created.data.into_json().expect("json data")["createCapability"];
-    let capability_id = capability["id"].as_str().expect("capability id").to_owned();
-    assert_eq!(capability["name"], name);
-    assert_eq!(capability["resourceKind"], "channel");
+    let action = &created.data.into_json().expect("json data")["createAction"];
+    let action_id = action["id"].as_str().expect("action id").to_owned();
+    assert_eq!(action["name"], name);
+    assert_eq!(action["applicability"][0]["objectKind"], "resource");
+    assert_eq!(action["applicability"][0]["objectType"], "resource:channel");
 
     let listed = schema
         .execute(authed(format!(
             r#"
             {{
-              capabilities(resourceKind: "channel") {{
-                items {{ id name resourceKind }}
+              actions(objectKind: "resource", objectType: "resource:channel") {{
+                items {{ id name applicability {{ objectKind objectType }} }}
                 total
               }}
-              capability(id: "{capability_id}") {{
+              action(id: "{action_id}") {{
                 id
                 name
               }}
@@ -221,12 +260,12 @@ async fn create_capability_and_list_it() {
         .await;
     assert!(listed.errors.is_empty(), "{:?}", listed.errors);
     let data = listed.data.into_json().expect("json data");
-    assert_eq!(data["capability"]["id"], capability_id);
-    assert!(data["capabilities"]["items"]
+    assert_eq!(data["action"]["id"], action_id);
+    assert!(data["actions"]["items"]
         .as_array()
         .expect("items")
         .iter()
-        .any(|item| item["id"] == capability_id));
+        .any(|item| item["id"] == action_id));
 }
 
 #[tokio::test]
@@ -272,8 +311,11 @@ async fn unauthorized_read_query_fails_and_admin_read_succeeds() {
             "#,
         ))
         .await;
-    assert!(!unauthorized.errors.is_empty());
-    assert!(unauthorized.errors[0].message.contains("forbidden"));
+    assert!(unauthorized.errors.is_empty(), "{:?}", unauthorized.errors);
+    assert_eq!(
+        unauthorized.data.into_json().expect("json data")["resources"]["total"],
+        0
+    );
 
     let authorized = schema
         .execute(authed(
@@ -321,7 +363,8 @@ async fn entity_query_allows_self_read_without_policy() {
 #[ignore]
 async fn create_role_and_attach_capability() {
     let pool = common::pool().await;
-    let publish_id = seeded_capability(&pool, "publish").await;
+    let publish_id = seeded_action(&pool, "publish").await;
+    let channel_id = channel(&pool).await;
     let schema = build_schema(state(pool));
     let name = format!("graphql-role-{}", Uuid::new_v4());
 
@@ -346,18 +389,40 @@ async fn create_role_and_attach_capability() {
     let role_id = role["id"].as_str().expect("role id").to_owned();
     assert_eq!(role["name"], name);
 
-    let added = schema
+    let block = schema
         .execute(authed(format!(
             r#"
             mutation {{
-              addRoleCapability(roleId: "{role_id}", capabilityId: "{publish_id}")
+              createPermissionBlock(input: {{
+                scopeMode: "object",
+                objectId: "{channel_id}",
+                actionIds: ["{publish_id}"]
+              }}) {{
+                id
+                actions {{ id name }}
+              }}
             }}
             "#
         )))
         .await;
-    assert!(added.errors.is_empty(), "{:?}", added.errors);
+    assert!(block.errors.is_empty(), "{:?}", block.errors);
+    let block_id = block.data.into_json().expect("json data")["createPermissionBlock"]["id"]
+        .as_str()
+        .expect("block id")
+        .to_owned();
+
+    let linked = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              replaceRolePermissionBlocks(roleId: "{role_id}", permissionBlockIds: ["{block_id}"])
+            }}
+            "#
+        )))
+        .await;
+    assert!(linked.errors.is_empty(), "{:?}", linked.errors);
     assert_eq!(
-        added.data.into_json().expect("json data")["addRoleCapability"],
+        linked.data.into_json().expect("json data")["replaceRolePermissionBlocks"],
         true
     );
 
@@ -366,10 +431,12 @@ async fn create_role_and_attach_capability() {
             r#"
             {{
               roles {{
-                items {{ id name }}
+                items {{ id name derivedKind }}
               }}
               role(id: "{role_id}") {{ id name }}
-              roleCapabilities(roleId: "{role_id}") {{ id name }}
+              attached: role(id: "{role_id}") {{
+                permissionBlocks {{ id actions {{ id name }} }}
+              }}
             }}
             "#
         )))
@@ -382,9 +449,9 @@ async fn create_role_and_attach_capability() {
         .expect("roles")
         .iter()
         .any(|item| item["id"] == role_id));
-    assert!(data["roleCapabilities"]
+    assert!(data["attached"]["permissionBlocks"][0]["actions"]
         .as_array()
-        .expect("capabilities")
+        .expect("actions")
         .iter()
         .any(|item| item["id"] == publish_id.to_string()));
 }
@@ -395,37 +462,54 @@ async fn create_policy_and_authz_check_allow_and_deny() {
     let pool = common::pool().await;
     let device_id = entity(&pool, "device").await;
     let channel_id = channel(&pool).await;
-    let publish_id = seeded_capability(&pool, "publish").await;
+    let publish_id = seeded_action(&pool, "publish").await;
     let schema = build_schema(state(pool));
 
-    let created = schema
+    let block = schema
         .execute(authed(format!(
             r#"
             mutation {{
-              createPolicy(input: {{
-                subjectKind: entity,
-                subjectId: "{device_id}",
-                grantKind: capability,
-                grantId: "{publish_id}",
-                scopeKind: object,
-                scopeRef: "{channel_id}",
-                effect: allow
+              createPermissionBlock(input: {{
+                scopeMode: "object",
+                objectId: "{channel_id}",
+                effect: allow,
+                actionIds: ["{publish_id}"]
               }}) {{
                 id
-                subjectKind
-                grantKind
-                scopeKind
-                scopeRef
                 effect
               }}
             }}
             "#
         )))
         .await;
+    assert!(block.errors.is_empty(), "{:?}", block.errors);
+    let block_id = block.data.into_json().expect("json data")["createPermissionBlock"]["id"]
+        .as_str()
+        .expect("block id")
+        .to_owned();
+
+    let created = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createDirectPolicy(input: {{
+                subjectKind: entity,
+                subjectId: "{device_id}",
+                permissionBlockId: "{block_id}"
+              }}) {{
+                id
+                subjectKind
+                subjectId
+                permissionBlockId
+              }}
+            }}
+            "#
+        )))
+        .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
-    let policy = &created.data.into_json().expect("json data")["createPolicy"];
+    let policy = &created.data.into_json().expect("json data")["createDirectPolicy"];
     let policy_id = policy["id"].as_str().expect("policy id").to_owned();
-    assert_eq!(policy["effect"], "allow");
+    assert_eq!(policy["permissionBlockId"], block_id);
 
     let checked = schema
         .execute(authed(format!(
@@ -460,21 +544,19 @@ async fn create_policy_and_authz_check_allow_and_deny() {
         .execute(authed(format!(
             r#"
             {{
-              policies(subjectId: "{device_id}", subjectKind: entity) {{
-                items {{ id subjectId }}
+              directPolicies(subjectId: "{device_id}", subjectKind: entity) {{
+                items {{ id subjectId permissionBlockId }}
                 total
               }}
-              policy(id: "{policy_id}") {{ id subjectId }}
             }}
             "#
         )))
         .await;
     assert!(listed.errors.is_empty(), "{:?}", listed.errors);
     let data = listed.data.into_json().expect("json data");
-    assert_eq!(data["policy"]["id"], policy_id);
-    assert!(data["policies"]["items"]
+    assert!(data["directPolicies"]["items"]
         .as_array()
-        .expect("policies")
+        .expect("direct policies")
         .iter()
         .any(|item| item["id"] == policy_id));
 }
@@ -486,14 +568,14 @@ async fn subject_role_assignments_list_group_composites_and_authorize_members() 
     let tenant_id = tenant(&pool).await;
     let user_id = tenant_entity(&pool, tenant_id, "human").await;
     let group_id = tenant_group(&pool, tenant_id).await;
-    sqlx::query("INSERT INTO group_members (group_id, entity_id) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
         .bind(group_id)
         .bind(user_id)
         .execute(&pool)
         .await
         .expect("insert group member");
-    let read_id = seeded_capability(&pool, "read").await;
-    let simple_role_id = scoped_role(
+    let read_id = seeded_action(&pool, "read").await;
+    let role_id = scoped_role(
         &pool,
         tenant_id,
         "group-reader",
@@ -501,41 +583,18 @@ async fn subject_role_assignments_list_group_composites_and_authorize_members() 
         &group_id.to_string(),
     )
     .await;
-    sqlx::query("INSERT INTO role_capabilities (role_id, capability_id) VALUES ($1, $2)")
-        .bind(simple_role_id)
-        .bind(read_id)
-        .execute(&pool)
-        .await
-        .expect("insert role capability");
-    let composite_role_id = scoped_role(
-        &pool,
-        tenant_id,
-        "group-operator",
-        "object",
-        &group_id.to_string(),
-    )
-    .await;
-    sqlx::query("INSERT INTO role_composites (parent_role_id, child_role_id) VALUES ($1, $2)")
-        .bind(composite_role_id)
-        .bind(simple_role_id)
-        .execute(&pool)
-        .await
-        .expect("insert role composite");
+    attach_role_action(&pool, role_id, tenant_id, group_id, "group", read_id).await;
     let schema = build_schema(state(pool));
 
     let assigned = schema
         .execute(authed(format!(
             r#"
             mutation {{
-              createPolicy(input: {{
+              createRoleAssignment(input: {{
                 tenantId: "{tenant_id}",
                 subjectKind: group,
                 subjectId: "{group_id}",
-                grantKind: role,
-                grantId: "{composite_role_id}",
-                scopeKind: tenant,
-                scopeRef: "{tenant_id}",
-                effect: allow
+                roleId: "{role_id}"
               }}) {{
                 id
               }}
@@ -549,16 +608,14 @@ async fn subject_role_assignments_list_group_composites_and_authorize_members() 
         .execute(authed(format!(
             r#"
             {{
-              subjectRoleAssignments(
+                roleAssignments(
                 tenantId: "{tenant_id}",
                 subjectKind: group,
-                subjectId: "{group_id}",
-                derivedKind: "composite"
+                subjectId: "{group_id}"
               ) {{
                 total
                 items {{
-                  policy {{ subjectKind subjectId grantId }}
-                  role {{ id name derivedKind childRoles {{ id }} }}
+                  role {{ id name derivedKind }}
                 }}
               }}
             }}
@@ -567,17 +624,10 @@ async fn subject_role_assignments_list_group_composites_and_authorize_members() 
         .await;
     assert!(listed.errors.is_empty(), "{:?}", listed.errors);
     let data = listed.data.into_json().expect("json data");
-    let assignments = &data["subjectRoleAssignments"];
+    let assignments = &data["roleAssignments"];
     assert_eq!(assignments["total"], 1);
-    assert_eq!(
-        assignments["items"][0]["role"]["id"],
-        composite_role_id.to_string()
-    );
-    assert_eq!(assignments["items"][0]["role"]["derivedKind"], "composite");
-    assert_eq!(
-        assignments["items"][0]["role"]["childRoles"][0]["id"],
-        simple_role_id.to_string()
-    );
+    assert_eq!(assignments["items"][0]["role"]["id"], role_id.to_string());
+    assert_eq!(assignments["items"][0]["role"]["derivedKind"], "simple");
 
     let checked = schema
         .execute(authed_as(
@@ -625,15 +675,11 @@ async fn create_policy_rejects_cross_tenant_role_assignment() {
         .execute(authed(format!(
             r#"
             mutation {{
-              createPolicy(input: {{
+              createRoleAssignment(input: {{
                 tenantId: "{tenant_a}",
                 subjectKind: group,
                 subjectId: "{group_id}",
-                grantKind: role,
-                grantId: "{foreign_role_id}",
-                scopeKind: tenant,
-                scopeRef: "{tenant_a}",
-                effect: allow
+                roleId: "{foreign_role_id}"
               }}) {{
                 id
               }}
@@ -645,7 +691,7 @@ async fn create_policy_rejects_cross_tenant_role_assignment() {
     assert!(!response.errors.is_empty());
     assert!(response.errors[0]
         .message
-        .contains("role from another tenant"));
+        .contains("tenantId must match role tenantId"));
 }
 
 #[tokio::test]
@@ -654,20 +700,38 @@ async fn authz_explain_returns_decision_details() {
     let pool = common::pool().await;
     let device_id = entity(&pool, "device").await;
     let channel_id = channel(&pool).await;
-    let publish_id = seeded_capability(&pool, "publish").await;
+    let publish_id = seeded_action(&pool, "publish").await;
     let schema = build_schema(state(pool));
+
+    let block = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createPermissionBlock(input: {{
+                scopeMode: "object",
+                objectId: "{channel_id}",
+                actionIds: ["{publish_id}"]
+              }}) {{
+                id
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(block.errors.is_empty(), "{:?}", block.errors);
+    let block_id = block.data.into_json().expect("json data")["createPermissionBlock"]["id"]
+        .as_str()
+        .expect("block id")
+        .to_owned();
 
     let created = schema
         .execute(authed(format!(
             r#"
             mutation {{
-              createPolicy(input: {{
+              createDirectPolicy(input: {{
                 subjectKind: entity,
                 subjectId: "{device_id}",
-                grantKind: capability,
-                grantId: "{publish_id}",
-                scopeKind: object,
-                scopeRef: "{channel_id}"
+                permissionBlockId: "{block_id}"
               }}) {{
                 id
               }}

@@ -44,7 +44,11 @@ export function renderCell(
     return (
       <DisplayTags
         className="max-w-72"
-        tags={value.map((item) => String(item))}
+        tags={value.map((item) =>
+          typeof item === "object" && item !== null && "name" in item
+            ? String(item.name)
+            : String(item),
+        )}
       />
     );
   }

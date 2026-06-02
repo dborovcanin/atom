@@ -10,19 +10,19 @@ mod common;
 use atom::models::{
     enums::{Effect, GrantKind, ScopeKind, SubjectKind},
     group::CreateGroup,
-    policy::CreatePolicyBinding,
-    role::CreateRole,
+    policy::{CreatePolicyBinding, CreateRoleAssignment},
+    role::{CreateRole, CreateRolePermissionBlock},
 };
 use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
 async fn capability_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM capabilities WHERE name = $1 LIMIT 1")
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
-        .expect("capability")
+        .expect("action")
 }
 
 async fn entity(pool: &sqlx::PgPool, kind: &str) -> Uuid {
@@ -34,6 +34,45 @@ async fn entity(pool: &sqlx::PgPool, kind: &str) -> Uuid {
         .execute(pool)
         .await
         .expect("insert entity");
+    id
+}
+
+async fn tenant_entity(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("m8-tenant-{kind}-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert tenant entity");
+    id
+}
+
+async fn tenant(pool: &sqlx::PgPool) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+        .bind(id)
+        .bind(format!("m8-tenant-{id}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+    id
+}
+
+async fn resource(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
+        .bind(id)
+        .bind(kind)
+        .bind(format!("m8-{kind}-{id}"))
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("insert resource");
     id
 }
 
@@ -60,7 +99,7 @@ async fn direct_policy_rejects_device_manage_resource_and_persists_no_row() {
     assert!(err.to_string().contains("guardrail rejected"));
 
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM policy_bindings WHERE subject_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1")
             .bind(device)
             .fetch_one(&p)
             .await
@@ -72,41 +111,41 @@ async fn direct_policy_rejects_device_manage_resource_and_persists_no_row() {
 #[ignore]
 async fn role_capability_addition_rejects_existing_device_role_holder() {
     let p = pool().await;
-    let device = entity(&p, "device").await;
-    let role = atom::authz::repo::create_role(
+    let tenant_id = tenant(&p).await;
+    let device = tenant_entity(&p, tenant_id, "device").await;
+    let manage_id = capability_id(&p, "manage").await;
+    let role = atom::authz::repo::create_role_with_permission_blocks(
         &p,
         CreateRole {
             name: format!("m8-role-{}", Uuid::new_v4()),
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             description: None,
-            scope_kind: None,
-            scope_ref: None,
         },
+        &[CreateRolePermissionBlock {
+            applies_to: "object_kind".to_string(),
+            object_id: None,
+            object_kind: Some("resource".to_string()),
+            object_type: None,
+            tenant_id: Some(tenant_id),
+            group_id: None,
+            capability_ids: vec![manage_id],
+        }],
+        &[],
     )
     .await
     .expect("role");
 
-    atom::authz::repo::create_policy(
+    let err = atom::authz::repo::create_role_assignment(
         &p,
-        CreatePolicyBinding {
-            tenant_id: None,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
             subject_kind: SubjectKind::Entity,
             subject_id: device,
-            grant_kind: GrantKind::Role,
-            grant_id: role.id,
-            scope_kind: ScopeKind::ObjectKind,
-            scope_ref: Some("resource".into()),
-            effect: Effect::Allow,
-            conditions: json!({}),
+            role_id: role.id,
         },
     )
     .await
-    .expect("role binding");
-
-    let err =
-        atom::authz::repo::add_role_capability(&p, role.id, capability_id(&p, "manage").await)
-            .await
-            .expect_err("guardrail should reject role cap");
+    .expect_err("guardrail should reject role assignment");
     assert!(err.to_string().contains("guardrail rejected"));
 }
 
@@ -114,14 +153,15 @@ async fn role_capability_addition_rejects_existing_device_role_holder() {
 #[ignore]
 async fn group_membership_rejects_new_device_that_would_inherit_denied_policy() {
     let p = pool().await;
-    let human = entity(&p, "human").await;
-    let device = entity(&p, "device").await;
+    let tenant_id = tenant(&p).await;
+    let human = tenant_entity(&p, tenant_id, "human").await;
+    let device = tenant_entity(&p, tenant_id, "device").await;
     let group = atom::identity::repo::create_group(
         &p,
         CreateGroup {
             id: None,
             name: format!("m8-group-{}", Uuid::new_v4()),
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             group_type: Some("principal".to_string()),
             description: None,
             attributes: json!({}),
@@ -136,7 +176,7 @@ async fn group_membership_rejects_new_device_that_would_inherit_denied_policy() 
     atom::authz::repo::create_policy(
         &p,
         CreatePolicyBinding {
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             subject_kind: SubjectKind::Group,
             subject_id: group.id,
             grant_kind: GrantKind::Capability,
@@ -154,4 +194,113 @@ async fn group_membership_rejects_new_device_that_would_inherit_denied_policy() 
         .await
         .expect_err("guardrail should reject device membership");
     assert!(err.to_string().contains("guardrail rejected"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn channel_scoped_role_rejects_rule_only_capability() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let publish_id = capability_id(&p, "publish").await;
+    let execute_id = capability_id(&p, "execute").await;
+
+    atom::authz::repo::create_role_with_permission_blocks(
+        &p,
+        CreateRole {
+            name: format!("m8-channel-publisher-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+        &[CreateRolePermissionBlock {
+            applies_to: "object_type".to_string(),
+            object_id: None,
+            object_kind: Some("resource".to_string()),
+            object_type: Some("resource:channel".to_string()),
+            tenant_id: Some(tenant_id),
+            group_id: None,
+            capability_ids: vec![publish_id],
+        }],
+        &[],
+    )
+    .await
+    .expect("publish is valid for channels");
+
+    let err = atom::authz::repo::create_role_with_permission_blocks(
+        &p,
+        CreateRole {
+            name: format!("m8-channel-execute-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+        &[CreateRolePermissionBlock {
+            applies_to: "object_type".to_string(),
+            object_id: None,
+            object_kind: Some("resource".to_string()),
+            object_type: Some("resource:channel".to_string()),
+            tenant_id: Some(tenant_id),
+            group_id: None,
+            capability_ids: vec![execute_id],
+        }],
+        &[],
+    )
+    .await
+    .expect_err("execute is not valid for channels");
+    assert!(err
+        .to_string()
+        .contains("capability execute is not applicable to resource:channel"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn exact_object_permission_block_uses_real_object_type() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let rule_id = resource(&p, tenant_id, "rule").await;
+    let publish_id = capability_id(&p, "publish").await;
+    let execute_id = capability_id(&p, "execute").await;
+
+    atom::authz::repo::create_role_with_permission_blocks(
+        &p,
+        CreateRole {
+            name: format!("m8-rule-executor-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+        &[CreateRolePermissionBlock {
+            applies_to: "object".to_string(),
+            object_id: Some(rule_id),
+            object_kind: None,
+            object_type: None,
+            tenant_id: None,
+            group_id: None,
+            capability_ids: vec![execute_id],
+        }],
+        &[],
+    )
+    .await
+    .expect("execute is valid for rules");
+
+    let err = atom::authz::repo::create_role_with_permission_blocks(
+        &p,
+        CreateRole {
+            name: format!("m8-rule-publisher-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+        &[CreateRolePermissionBlock {
+            applies_to: "object".to_string(),
+            object_id: Some(rule_id),
+            object_kind: None,
+            object_type: None,
+            tenant_id: None,
+            group_id: None,
+            capability_ids: vec![publish_id],
+        }],
+        &[],
+    )
+    .await
+    .expect_err("publish is not valid for rules");
+    assert!(err
+        .to_string()
+        .contains("capability publish is not applicable to resource:rule"));
 }

@@ -54,7 +54,7 @@ async fn human(pool: &sqlx::PgPool, tenant_id: Option<Uuid>) -> Uuid {
 }
 
 async fn capability_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM capabilities WHERE name = $1 LIMIT 1")
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -103,15 +103,15 @@ async fn tenant_audit_filter_returns_only_allowed_tenant_rows() {
             subject_kind: SubjectKind::Entity,
             subject_id: auditor,
             grant_kind: GrantKind::Capability,
-            grant_id: capability_id(&p, "audit.read").await,
-            scope_kind: ScopeKind::Tenant,
-            scope_ref: Some(t1.to_string()),
+            grant_id: capability_id(&p, "read").await,
+            scope_kind: ScopeKind::ObjectKind,
+            scope_ref: Some("audit_log".to_string()),
             effect: Effect::Allow,
             conditions: json!({}),
         },
     )
     .await
-    .expect("audit.read policy");
+    .expect("audit log read policy");
 
     audit::write(
         &p,
@@ -132,9 +132,10 @@ async fn tenant_audit_filter_returns_only_allowed_tenant_rows() {
     )
     .await;
 
-    let allowed = atom::authz::repo::tenant_ids_for_capability(&p, auditor, "audit.read")
-        .await
-        .expect("tenant filter");
+    let allowed =
+        atom::authz::repo::tenant_ids_for_action_on_object_kind(&p, auditor, "read", "audit_log")
+            .await
+            .expect("tenant filter");
     let logs = atom::authz::repo::audit_logs(
         &p,
         AuditQuery {

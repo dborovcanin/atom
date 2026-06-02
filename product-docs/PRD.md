@@ -61,7 +61,7 @@ Applications such as Magistrala store product-specific metadata in `attributes`.
 
 Magistrala and similar IoT platforms need identity and authorization for humans, devices, services, workloads, applications, domains, channels, and other resources. Keycloak can solve parts of this, but it is operationally heavy and does not map cleanly to IoT-native authorization questions.
 
-The current project needs a single PRD because the important product intent is spread across code, API docs, `spec.md`, and endpoint-specific product docs. Without a consolidated requirements document, it is easy to miss major decisions:
+The current project needs a single PRD because product intent must not be spread across stale specs, implementation plans, code comments, and endpoint-specific notes. Without a consolidated requirements document, it is easy to miss major decisions:
 
 - there is no special user type;
 - tenants are first-class isolation boundaries;
@@ -82,7 +82,7 @@ The current project needs a single PRD because the important product intent is s
 5. Make tenants first-class isolation boundaries, with Magistrala domains mapping directly to Atom tenants.
 6. Keep authorization online: every access decision is evaluated against current database state.
 7. Provide explain, access listing, audit, and hygiene endpoints so operators can understand and maintain access state.
-8. Expose both HTTP and gRPC interfaces for runtime integration.
+8. Expose GraphQL-first management APIs and stable runtime authorization APIs.
 9. Keep the implementation small: one binary, one Postgres database, automatic migrations.
 
 ## Non-goals
@@ -93,7 +93,7 @@ The current project needs a single PRD because the important product intent is s
 4. Atom does not provide SCIM provisioning in the current scope.
 5. Atom does not embed permissions into JWTs.
 6. Atom does not replace application domain models; application-specific fields remain in `attributes`.
-7. Atom does not require GraphQL or a general-purpose policy language in the current scope.
+7. Atom does not provide a general-purpose policy language in the current scope.
 
 ---
 
@@ -118,7 +118,7 @@ Calls Atom from Magistrala or another service to create identities, create resou
 Needs:
 
 - low-latency `check` and bulk check APIs;
-- stable HTTP and gRPC contracts;
+- stable GraphQL and runtime authorization contracts;
 - domain objects expressible as Atom tenants/resources/entities;
 - deterministic authorization semantics.
 
@@ -202,7 +202,7 @@ Platform roles are tenant-free roles reserved for system, admin, and service aut
 Examples:
 
 - platform admin: manage platform-level objects and tenant administration workflows;
-- tenant lifecycle manager: create, update, freeze, and delete tenants through `tenant.manage`;
+- tenant lifecycle manager: create tenants through `create` on `tenant`, and update, freeze, and delete tenants through `manage` on `tenant`;
 - cross-tenant service role: allow trusted services to operate across tenants.
 
 Normal tenant users must not create tenant-free roles. Tenant-free roles require platform-level administration.
@@ -214,12 +214,12 @@ For tenant administration, Atom uses tenant-owned roles with permission blocks t
 The generated `tenant-admin` role should include permission blocks for:
 
 - normal tenant objects through `manage`;
-- tenant audit logs through `audit.read`;
-- credentials for tenant-owned entities through `credential.manage`;
+- tenant audit logs through `read` on `audit_log`;
+- credentials for tenant-owned entities through `manage` on `credential`;
 - tenant-owned assignments through `policy.manage`;
 - tenant-owned roles through `role.manage`.
 
-The seeded `tenant-admin` role intentionally does not include platform `tenant.manage`. A tenant admin cannot rename, freeze, or delete their own tenant unless a platform admin explicitly delegates that ability.
+The seeded `tenant-admin` role intentionally does not include platform `manage` on `tenant`. A tenant admin cannot rename, freeze, or delete their own tenant unless a platform admin explicitly delegates that ability.
 
 Device and workload runtime permissions should normally be granted through roles and assignments, or through trusted Direct Policies for strict runtime links such as client-channel publish/subscribe.
 
@@ -482,12 +482,12 @@ An action is a global action name such as:
 - `subscribe`
 - `execute`
 - `manage`
-- `credential.manage`
-- `signing_key.rotate`
-- `audit.read`
+- `create`
+- `revoke`
+- `rotate`
 - `policy.manage`
 - `role.manage`
-- `tenant.manage`
+- `authz.check`
 
 Do not create object-specific action names such as:
 
@@ -507,10 +507,10 @@ Recommended action groups:
 |---|---|---|
 | General object access | `read`, `write`, `delete`, `manage` | Administrative CRUD and object management |
 | Messaging/runtime | `publish`, `subscribe`, `execute` | Device, workload, and service runtime operations |
-| Credentials and keys | `credential.manage`, `signing_key.rotate` | Credential lifecycle and key rotation |
+| Credentials and keys | `manage`, `revoke`, `rotate` | Credential lifecycle and key rotation |
 | Access control | `policy.manage`, `role.manage` | Policy and role administration |
-| Tenant administration | `tenant.manage`, `manage` | Tenant lifecycle and tenant-scoped administration |
-| Audit | `audit.read` | Audit log access |
+| Tenant administration | `create`, `manage` | Tenant lifecycle and tenant-scoped administration |
+| Audit | `read` | Audit log access |
 
 Devices should normally receive only runtime-oriented actions such as `publish`, `subscribe`, and limited `read` for configuration or state. Devices should not receive administrative actions such as `manage`, `write`, or `delete` by default.
 
@@ -527,8 +527,9 @@ Examples:
 | `read`, `write`, `delete` | common protected objects such as entities, resources, Object Groups, rules, reports, and alarms |
 | `publish`, `subscribe` | channels |
 | `execute` | rules and reports |
-| `credential.manage` | entity credentials |
-| `tenant.manage` | tenant lifecycle |
+| `manage`, `revoke` | credentials |
+| `create`, `manage` | tenant lifecycle |
+| `rotate` | signing keys |
 | `role.manage`, `policy.manage` | roles and assignments |
 
 Invalid action/object pairs must be rejected:
@@ -552,6 +553,7 @@ The **kind** (`object_kind`) is the broad category. The canonical set is:
 - `policy`
 - `credential`
 - `audit_log`
+- `signing_key`
 
 `action` is a definition rather than a protected runtime object and is not in this set; action mutation is governed by `policy.manage` and `role.manage`.
 
@@ -846,7 +848,7 @@ Field meaning:
 - `tenant_id = <tenant>` means the rule applies only inside that tenant.
 - `entity_kind` is the kind of the subject receiving access.
 - `action_name` is the action being granted.
-- `object_kind` is the protected object type, such as `resource`, `entity`, `group`, `tenant`, `role`, `policy`, `credential`, or `audit_log`.
+- `object_kind` is the protected object type, such as `resource`, `entity`, `group`, `tenant`, `role`, `policy`, `credential`, `audit_log`, or `signing_key`.
 - `object_type` narrows the rule to a specific sub-kind such as `resource:channel` or `entity:device`. Always namespaced with its kind. Null means the rule applies to every sub-kind under the given `object_kind`.
 - `decision = allow` means the assignment is allowed.
 - `decision = deny` means the assignment is rejected.
@@ -981,7 +983,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 | TEN-1 | The system must expose first-class tenant CRUD and lifecycle APIs. | Must |
 | TEN-2 | Tenant lifecycle must support active, inactive, frozen, and deleted states. | Must |
 | TEN-3 | Tenant deletion must be soft delete by setting status to `deleted`. | Must |
-| TEN-4 | Tenant create, update, freeze, and delete operations must require platform `tenant.manage`. | Must |
+| TEN-4 | Tenant create must require platform `create` on `tenant`; update, freeze, and delete operations must require platform `manage` on `tenant`. | Must |
 | TEN-5 | Entities, resources, Object Groups, Principal Groups, and roles must be able to reference tenants by `tenant_id`. | Must |
 | TEN-6 | Magistrala domains must map directly to Atom tenants. | Must |
 | TEN-7 | Authorization checks must support tenant objects through `object_kind = "tenant"` and `object_id`. | Must |
@@ -993,7 +995,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 | TEN-13 | The tenant creator must receive the generated `tenant-admin` role. | Must |
 | TEN-14 | Authorization checks for inactive, frozen, or deleted tenants must be denied with a reason that includes tenant state. | Must |
 | TEN-15 | Atom must provide a tenant membership table for tenant-local human profile and membership state, while humans remain global by default in the entity model. | Must |
-| TEN-16 | The generated `tenant-admin` role must include `manage`, `audit.read`, `credential.manage`, `policy.manage`, and `role.manage` for the tenant. | Must |
+| TEN-16 | The generated `tenant-admin` role must include tenant-scoped `manage`, `read`, `policy.manage`, and `role.manage`. Audit access is represented by `read` on `audit_log`; credential administration is represented by `manage` on `credential`. | Must |
 
 ### Authorization
 
@@ -1185,7 +1187,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 - Existing `resource_id` authorization checks must remain supported.
 - New `object_kind` and `object_id` authorization checks must not break the legacy shape.
 - New APIs should use explicit object kind and object type values such as `object_kind = "resource"` and `object_type = "channel"`. No legacy scope or resource-kind form should appear in stored Permission Blocks, assignments, Direct Policies, guardrail rules, or audit records.
-- HTTP and gRPC authorization semantics must match.
+- GraphQL, custom endpoint, and runtime authorization semantics must match.
 
 ---
 
@@ -1284,7 +1286,7 @@ Atom is successful when:
 ## References
 
 - [README](../README.md)
-- [Technical spec](../spec.md)
+- [Access model](./11-access-model-simplification.md)
 - [OpenAPI spec](../apidocs/openapi.yaml)
 - [gRPC reference](../apidocs/grpc-reference.md)
 - [Magistrala integration](./10-magistrala-on-atom.md)

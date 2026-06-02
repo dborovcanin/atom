@@ -17,7 +17,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn capability_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM capabilities WHERE name = $1 LIMIT 1")
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await

@@ -34,7 +34,7 @@ pub struct TenantAdminBootstrap {
     pub tenant_id: Uuid,
     pub creator_id: Uuid,
     pub role_name: &'static str,
-    pub capabilities: [&'static str; 12],
+    pub capabilities: [&'static str; 9],
     pub scope_ref: String,
 }
 
@@ -53,15 +53,12 @@ pub fn tenant_admin_bootstrap(tenant_id: Uuid, creator_id: Uuid) -> TenantAdminB
         role_name: "tenant-admin",
         capabilities: [
             "manage",
-            "list",
             "read",
             "write",
             "delete",
             "publish",
             "subscribe",
             "execute",
-            "audit.read",
-            "credential.manage",
             "policy.manage",
             "role.manage",
         ],
@@ -118,8 +115,8 @@ async fn bootstrap_tenant_admin(
 
     let role_id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO roles (id, name, tenant_id, description, scope_kind, scope_ref)
-           VALUES ($1, $2, $3, 'Default tenant administration role', 'tenant', $3::text)"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description)
+           VALUES ($1, $2, $3, 'Default tenant administration role')"#,
     )
     .bind(role_id)
     .bind(plan.role_name)
@@ -128,15 +125,35 @@ async fn bootstrap_tenant_admin(
     .await
     .map_err(db_err)?;
 
+    let permission_block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, effect, conditions)
+           VALUES ($1, 'tenant', 'allow', '{}'::jsonb)
+           RETURNING id"#,
+    )
+    .bind(plan.tenant_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
     sqlx::query(
-        r#"INSERT INTO role_capabilities (role_id, capability_id)
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, c.id
-           FROM capabilities c
+           FROM actions c
            WHERE c.name = ANY($2::text[])
            ON CONFLICT DO NOTHING"#,
     )
-    .bind(role_id)
+    .bind(permission_block_id)
     .bind(plan.capabilities.as_slice())
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    sqlx::query(
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+           VALUES ($1, $2)"#,
+    )
+    .bind(role_id)
+    .bind(permission_block_id)
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -145,14 +162,14 @@ async fn bootstrap_tenant_admin(
         r#"SELECT required.name
            FROM unnest($1::text[]) AS required(name)
            WHERE NOT EXISTS (
-               SELECT 1 FROM role_capabilities rc
-               JOIN capabilities c ON c.id = rc.capability_id
-               WHERE rc.role_id = $2 AND c.name = required.name
+               SELECT 1 FROM permission_block_actions pba
+               JOIN actions c ON c.id = pba.action_id
+               WHERE pba.permission_block_id = $2 AND c.name = required.name
            )
            ORDER BY required.name"#,
     )
     .bind(plan.capabilities.as_slice())
-    .bind(role_id)
+    .bind(permission_block_id)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -164,14 +181,13 @@ async fn bootstrap_tenant_admin(
     }
 
     sqlx::query(
-        r#"INSERT INTO policy_bindings
-             (tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
-           VALUES ($1, 'entity', $2, 'role', $3, 'tenant', $4, 'allow', '{}')"#,
+        r#"INSERT INTO role_assignments
+             (tenant_id, subject_kind, subject_id, role_id)
+           VALUES ($1, 'entity', $2, $3)"#,
     )
     .bind(plan.tenant_id)
     .bind(plan.creator_id)
     .bind(role_id)
-    .bind(plan.scope_ref)
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -269,7 +285,7 @@ pub async fn list_tenants_for_entity(
     let route = params.route;
     let status = params.status;
     let q = search_pattern(params.q);
-    let access_actions = ["list", "read", "manage"];
+    let access_actions = ["read", "manage"];
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants t
@@ -279,7 +295,7 @@ pub async fn list_tenants_for_entity(
              AND ($5::text IS NULL OR t.name ILIKE $5 OR t.route ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
              AND EXISTS (
                  SELECT 1
-                 FROM policy_bindings pb
+                 FROM effective_access_edges() pb
                  WHERE (
                      (pb.subject_kind = 'entity' AND pb.subject_id = $1)
                      OR (pb.subject_kind = 'group' AND pb.subject_id IN (
@@ -293,20 +309,20 @@ pub async fn list_tenants_for_entity(
                  )
                  AND (
                      (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM capabilities
-                         WHERE name = ANY($6::text[]) AND resource_kind IS NULL
+                         SELECT id FROM actions
+                         WHERE name = ANY($6::text[])
                      ))
                      OR (pb.grant_kind = 'role' AND pb.grant_id IN (
                          SELECT rc.role_id
-                         FROM role_capabilities rc
-                         JOIN capabilities c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[]) AND c.resource_kind IS NULL
+                         FROM effective_role_actions() rc
+                         JOIN actions c ON c.id = rc.capability_id
+                         WHERE c.name = ANY($6::text[])
                      ))
                  )
              )
              AND NOT EXISTS (
                  SELECT 1
-                 FROM policy_bindings pb
+                 FROM effective_access_edges() pb
                  WHERE (
                      (pb.subject_kind = 'entity' AND pb.subject_id = $1)
                      OR (pb.subject_kind = 'group' AND pb.subject_id IN (
@@ -320,14 +336,14 @@ pub async fn list_tenants_for_entity(
                  )
                  AND (
                      (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM capabilities
-                         WHERE name = ANY($6::text[]) AND resource_kind IS NULL
+                         SELECT id FROM actions
+                         WHERE name = ANY($6::text[])
                      ))
                      OR (pb.grant_kind = 'role' AND pb.grant_id IN (
                          SELECT rc.role_id
-                         FROM role_capabilities rc
-                         JOIN capabilities c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[]) AND c.resource_kind IS NULL
+                         FROM effective_role_actions() rc
+                         JOIN actions c ON c.id = rc.capability_id
+                         WHERE c.name = ANY($6::text[])
                      ))
                  )
              )
@@ -354,7 +370,7 @@ pub async fn list_tenants_for_entity(
              AND ($5::text IS NULL OR t.name ILIKE $5 OR t.route ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
              AND EXISTS (
                  SELECT 1
-                 FROM policy_bindings pb
+                 FROM effective_access_edges() pb
                  WHERE (
                      (pb.subject_kind = 'entity' AND pb.subject_id = $1)
                      OR (pb.subject_kind = 'group' AND pb.subject_id IN (
@@ -368,20 +384,20 @@ pub async fn list_tenants_for_entity(
                  )
                  AND (
                      (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM capabilities
-                         WHERE name = ANY($6::text[]) AND resource_kind IS NULL
+                         SELECT id FROM actions
+                         WHERE name = ANY($6::text[])
                      ))
                      OR (pb.grant_kind = 'role' AND pb.grant_id IN (
                          SELECT rc.role_id
-                         FROM role_capabilities rc
-                         JOIN capabilities c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[]) AND c.resource_kind IS NULL
+                         FROM effective_role_actions() rc
+                         JOIN actions c ON c.id = rc.capability_id
+                         WHERE c.name = ANY($6::text[])
                      ))
                  )
              )
              AND NOT EXISTS (
                  SELECT 1
-                 FROM policy_bindings pb
+                 FROM effective_access_edges() pb
                  WHERE (
                      (pb.subject_kind = 'entity' AND pb.subject_id = $1)
                      OR (pb.subject_kind = 'group' AND pb.subject_id IN (
@@ -395,14 +411,14 @@ pub async fn list_tenants_for_entity(
                  )
                  AND (
                      (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM capabilities
-                         WHERE name = ANY($6::text[]) AND resource_kind IS NULL
+                         SELECT id FROM actions
+                         WHERE name = ANY($6::text[])
                      ))
                      OR (pb.grant_kind = 'role' AND pb.grant_id IN (
                          SELECT rc.role_id
-                         FROM role_capabilities rc
-                         JOIN capabilities c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[]) AND c.resource_kind IS NULL
+                         FROM effective_role_actions() rc
+                         JOIN actions c ON c.id = rc.capability_id
+                         WHERE c.name = ANY($6::text[])
                      ))
                  )
              )"#,
@@ -761,8 +777,8 @@ pub async fn remove_tenant_member(
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     sqlx::query(
-        r#"DELETE FROM group_members gm
-           USING groups g
+        r#"DELETE FROM principal_group_members gm
+           USING principal_groups g
            WHERE gm.group_id = g.id
              AND g.tenant_id = $1
              AND gm.entity_id = $2"#,
@@ -774,7 +790,7 @@ pub async fn remove_tenant_member(
     .map_err(db_err)?;
 
     sqlx::query(
-        r#"DELETE FROM policy_bindings
+        r#"DELETE FROM role_assignments
            WHERE tenant_id = $1
              AND subject_kind = 'entity'
              AND subject_id = $2"#,
@@ -812,11 +828,11 @@ pub async fn list_tenant_role_actions(
     let rows = sqlx::query(
         r#"WITH bindings AS (
              SELECT pb.*, 'direct'::text AS access_type
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              WHERE pb.subject_kind = 'entity' AND pb.subject_id = $2
              UNION ALL
              SELECT pb.*, 'group'::text AS access_type
-             FROM policy_bindings pb
+             FROM effective_access_edges() pb
              JOIN group_members gm ON gm.group_id = pb.subject_id
              WHERE pb.subject_kind = 'group' AND gm.entity_id = $2
            )
@@ -826,8 +842,8 @@ pub async fn list_tenant_role_actions(
                   MIN(bindings.access_type) AS access_type
            FROM bindings
            JOIN roles r ON bindings.grant_kind = 'role' AND r.id = bindings.grant_id
-           JOIN role_capabilities rc ON rc.role_id = r.id
-           JOIN capabilities c ON c.id = rc.capability_id
+           JOIN effective_role_actions() rc ON rc.role_id = r.id
+           JOIN actions c ON c.id = rc.capability_id
            WHERE bindings.effect = 'allow'
              AND (r.tenant_id = $1 OR r.tenant_id IS NULL)
              AND (
@@ -976,8 +992,6 @@ async fn grant_invitation_role(
     invitee_user_id: Uuid,
     role_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    use crate::models::enums::{Effect, GrantKind, ScopeKind, SubjectKind};
-
     sqlx::query(
         r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
            VALUES ($1, $2, 'active')
@@ -995,29 +1009,20 @@ async fn grant_invitation_role(
     };
 
     sqlx::query(
-        r#"INSERT INTO policy_bindings
-             (tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
-           SELECT $1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb
+        r#"INSERT INTO role_assignments
+             (tenant_id, subject_kind, subject_id, role_id)
+           SELECT $1, 'entity', $2, $3
            WHERE NOT EXISTS (
-               SELECT 1 FROM policy_bindings
+               SELECT 1 FROM role_assignments
                WHERE tenant_id = $1
-                 AND subject_kind = $2
-                 AND subject_id = $3
-                 AND grant_kind = $4
-                 AND grant_id = $5
-                 AND scope_kind = $6
-                 AND scope_ref = $7
-                 AND effect = $8
+                 AND subject_kind = 'entity'
+                 AND subject_id = $2
+                 AND role_id = $3
            )"#,
     )
     .bind(tenant_id)
-    .bind(SubjectKind::Entity)
     .bind(invitee_user_id)
-    .bind(GrantKind::Role)
     .bind(role_id)
-    .bind(ScopeKind::Tenant)
-    .bind(tenant_id.to_string())
-    .bind(Effect::Allow)
     .execute(pool)
     .await
     .map_err(db_err)?;
@@ -1202,15 +1207,12 @@ mod tests {
             plan.capabilities,
             [
                 "manage",
-                "list",
                 "read",
                 "write",
                 "delete",
                 "publish",
                 "subscribe",
                 "execute",
-                "audit.read",
-                "credential.manage",
                 "policy.manage",
                 "role.manage"
             ]

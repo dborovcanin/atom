@@ -202,7 +202,8 @@ export function GroupEditForm({
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Parent group policies apply to members of this group.
+                Parent Object Groups extend where role permissions apply. They
+                do not grant access by themselves.
               </p>
               <FormMessage />
             </FormItem>

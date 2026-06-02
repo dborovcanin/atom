@@ -57,10 +57,11 @@ export function CommandMenu() {
           <CommandGroup heading="Control plane">
             {[
               { title: "Dashboard", route: "/dashboard" },
-              ...crudResources.map((resource) => ({
-                title: resource.title,
-                route: resource.route,
-              })),
+              ...crudResources
+                .map((resource) => ({
+                  title: resource.title,
+                  route: resource.route,
+                })),
               { title: "Authorization debugger", route: "/authz" },
               { title: "Audit logs", route: "/audit" },
               { title: "API endpoints", route: "/endpoints" },

@@ -163,17 +163,22 @@ mod tests {
             "apiEndpointExecutions",
             "groups",
             "group",
+            "objectGroups",
+            "principalGroups",
             "groupMembers",
             "entityGroups",
             "credentials",
             "ownedEntities",
+            "authorizedObjectIds",
             "roles",
             "role",
-            "subjectRoleAssignments",
-            "capabilities",
-            "capability",
-            "policies",
-            "policy",
+            "actions",
+            "action",
+            "actionApplicability",
+            "permissionBlocks",
+            "permissionBlock",
+            "roleAssignments",
+            "directPolicies",
             "auditLogs",
             "entityAuditLogs",
             "orphanPolicies",
@@ -227,9 +232,51 @@ mod tests {
             "removeOwnership",
             "createRole",
             "deleteRole",
+            "replaceRolePermissionBlocks",
+            "createAction",
+            "updateAction",
+            "deleteAction",
+            "addActionApplicability",
+            "removeActionApplicability",
+            "createPermissionBlock",
+            "deletePermissionBlock",
+            "createRoleAssignment",
+            "deleteRoleAssignment",
+            "createDirectPolicy",
+            "deleteDirectPolicy",
+            "authzCheck",
+            "authzExplain",
+            "authzBulkCheck",
+        ] {
+            assert!(
+                mutation_fields.contains(name),
+                "missing mutation field {name}"
+            );
+        }
+
+        for name in [
+            "apiTemplates",
+            "apiTemplate",
+            "capabilities",
+            "capability",
+            "policies",
+            "policy",
+            "roleCapabilities",
+            "rolePolicies",
+            "subjectRoleAssignments",
+        ] {
+            assert!(
+                !query_fields.contains(name),
+                "unexpected query field {name}"
+            );
+        }
+
+        for name in [
+            "createApiTemplate",
+            "updateApiTemplate",
+            "disableApiTemplate",
             "addRoleCapability",
             "removeRoleCapability",
-            "replaceRolePermissionBlocks",
             "addCompositeRoleChild",
             "removeCompositeRoleChild",
             "replaceCompositeRoleChildren",
@@ -241,27 +288,6 @@ mod tests {
             "deleteCapability",
             "createPolicy",
             "deletePolicy",
-            "authzCheck",
-            "authzExplain",
-            "authzBulkCheck",
-        ] {
-            assert!(
-                mutation_fields.contains(name),
-                "missing mutation field {name}"
-            );
-        }
-
-        for name in ["apiTemplates", "apiTemplate"] {
-            assert!(
-                !query_fields.contains(name),
-                "unexpected query field {name}"
-            );
-        }
-
-        for name in [
-            "createApiTemplate",
-            "updateApiTemplate",
-            "disableApiTemplate",
         ] {
             assert!(
                 !mutation_fields.contains(name),
@@ -362,51 +388,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subject_role_assignments_query_exposes_role_and_policy() {
-        let schema = build_schema(test_state());
-
-        let response = schema
-            .execute(Request::new(
-                r#"
-                {
-                  __schema {
-                    queryType {
-                      fields {
-                        name
-                        args { name }
-                      }
-                    }
-                  }
-                  assignmentType: __type(name: "SubjectRoleAssignment") {
-                    fields { name }
-                  }
-                }
-                "#,
-            ))
-            .await;
-
-        assert!(response.errors.is_empty(), "{:?}", response.errors);
-        let data = response.data.into_json().expect("json data");
-        let query_fields = data["__schema"]["queryType"]["fields"]
-            .as_array()
-            .expect("query fields");
-        let field = query_fields
-            .iter()
-            .find(|field| field["name"].as_str() == Some("subjectRoleAssignments"))
-            .expect("subjectRoleAssignments field");
-        let arg_names = field_names(&field["args"]);
-
-        assert!(arg_names.contains("subjectKind"));
-        assert!(arg_names.contains("subjectId"));
-        assert!(arg_names.contains("tenantId"));
-        assert!(arg_names.contains("derivedKind"));
-
-        let fields = field_names(&data["assignmentType"]["fields"]);
-        assert!(fields.contains("policy"));
-        assert!(fields.contains("role"));
-    }
-
-    #[tokio::test]
     async fn schema_enum_values_match_atom_storage_values() {
         let schema = build_schema(test_state());
 
@@ -418,8 +399,6 @@ mod tests {
                   entityStatus: __type(name: "EntityStatus") { enumValues { name } }
                   tenantStatus: __type(name: "TenantStatus") { enumValues { name } }
                   subjectKind: __type(name: "SubjectKind") { enumValues { name } }
-                  grantKind: __type(name: "GrantKind") { enumValues { name } }
-                  scopeKind: __type(name: "ScopeKind") { enumValues { name } }
                   effect: __type(name: "Effect") { enumValues { name } }
                   credentialKind: __type(name: "CredentialKind") { enumValues { name } }
                   auditOutcome: __type(name: "AuditOutcome") { enumValues { name } }
@@ -444,21 +423,6 @@ mod tests {
             set(&["active", "inactive", "frozen", "deleted"])
         );
         assert_eq!(enum_names(&data, "subjectKind"), set(&["entity", "group"]));
-        assert_eq!(enum_names(&data, "grantKind"), set(&["capability", "role"]));
-        assert_eq!(
-            enum_names(&data, "scopeKind"),
-            set(&[
-                "platform",
-                "tenant",
-                "object_kind",
-                "object_type",
-                "object",
-                "group_object_type",
-                "group_tree_object_type",
-                "group_child_kind",
-                "group_descendant_kind",
-            ])
-        );
         assert_eq!(enum_names(&data, "effect"), set(&["allow", "deny"]));
         assert_eq!(
             enum_names(&data, "credentialKind"),

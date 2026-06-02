@@ -103,6 +103,18 @@ export function CrudTable({
         );
       }
       const idField = resource.deleteIdField ?? "id";
+      if (resource.key === "capabilities") {
+        return graphqlClient({
+          query: resource.deleteMutation,
+          variables: {
+            input: {
+              actionId: row.actionId ?? row.capabilityId,
+              objectKind: row.objectKind,
+              objectType: row.objectType ?? null,
+            },
+          },
+        });
+      }
       return graphqlClient({
         query: resource.deleteMutation,
         variables: { id: row[idField] },
@@ -271,6 +283,7 @@ export function CrudTable({
       <DataTable
         columns={columns}
         data={rows}
+        filters={resource.filters}
         limit={limit}
         noResultsMessage={`No ${resource.title.toLowerCase()} found.`}
         page={page}
@@ -410,21 +423,35 @@ function TableRowActions({
           }
         />
       ) : resourceKey === "capabilities" ? (
-        <DeleteActionButtons
-          isDestroyPending={destroyPending}
-          onEdit={() => defer(() => onEdit.setCapability(row))}
-          onDelete={() =>
-            onDelete(
-              `Delete capability "${String(row.name ?? row.id)}"? This cannot be undone.`,
-            )
-          }
-        />
+        <>
+          <Button
+            disabled={missingUpdate}
+            onClick={() => defer(() => onEdit.setCapability(row))}
+            size="sm"
+            variant="outline"
+          >
+            Edit
+          </Button>
+          <Button
+            disabled={missingDelete || destroyPending}
+            onClick={() =>
+              onDelete(
+                `Delete applicability row "${String(row.actionName ?? row.capabilityName ?? row.id)}" on "${String(row.objectKind)}:${String(row.objectType ?? "NULL")}"? This cannot be undone.`,
+              )
+            }
+            size="sm"
+            variant="outline"
+            className="border-red-500/50 text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:border-red-500/40 dark:text-red-400"
+          >
+            Delete
+          </Button>
+        </>
       ) : resourceKey === "policies" ? (
         <DeleteActionButtons
           isDestroyPending={destroyPending}
           onEdit={() => defer(() => onEdit.setPolicy(row))}
           onDelete={() =>
-            onDelete("Delete this policy binding? This cannot be undone.")
+            onDelete("Delete this direct policy? This cannot be undone.")
           }
         />
       ) : (

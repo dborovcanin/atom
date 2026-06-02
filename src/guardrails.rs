@@ -111,12 +111,12 @@ pub async fn validate_role_capability(
     let capability_names = capability_names(pool, &[capability_id]).await?;
     let rows = sqlx::query(
         r#"SELECT e.kind AS entity_kind, pb.tenant_id, pb.scope_kind, pb.scope_ref
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            JOIN entities e ON pb.subject_kind = 'entity' AND e.id = pb.subject_id
            WHERE pb.grant_kind = 'role' AND pb.grant_id = $1
            UNION ALL
            SELECT e.kind AS entity_kind, pb.tenant_id, pb.scope_kind, pb.scope_ref
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            JOIN group_members gm ON pb.subject_kind = 'group' AND gm.group_id = pb.subject_id
            JOIN entities e ON e.id = gm.entity_id
            WHERE pb.grant_kind = 'role' AND pb.grant_id = $1"#,
@@ -142,6 +142,35 @@ pub async fn validate_role_capability(
             tenant_id,
         }));
     }
+
+    validate_assignments(pool, &assignments).await
+}
+
+pub async fn validate_role_assignment(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    subject_kind: SubjectKind,
+    subject_id: Uuid,
+    role_id: Uuid,
+) -> Result<(), AppError> {
+    let entity_kinds = subject_entity_kinds(pool, subject_kind, subject_id).await?;
+    if entity_kinds.is_empty() {
+        return Ok(());
+    }
+
+    let role_capabilities = role_permission_assignments(pool, &[role_id]).await?;
+    let assignments = entity_kinds
+        .into_iter()
+        .flat_map(|entity_kind| {
+            role_capabilities.iter().map(move |role_cap| Assignment {
+                entity_kind: entity_kind.clone(),
+                capability_name: role_cap.capability_name.clone(),
+                object_kind: role_cap.object_kind.clone(),
+                object_type: role_cap.object_type.clone(),
+                tenant_id,
+            })
+        })
+        .collect::<Vec<_>>();
 
     validate_assignments(pool, &assignments).await
 }
@@ -173,7 +202,7 @@ pub async fn validate_composite_role_assignment_plan(
         return Err(AppError::bad_request("invalid member reference"));
     }
 
-    let role_capabilities = role_capability_assignments(pool, &unique_child_role_ids).await?;
+    let role_capabilities = role_permission_assignments(pool, &unique_child_role_ids).await?;
     let assignments = entity_kinds
         .into_iter()
         .flat_map(|entity_kind| {
@@ -267,7 +296,7 @@ pub async fn validate_group_member(
                JOIN policy_groups pg ON pg.group_id = gh.child_id
            )
            SELECT pb.tenant_id, pb.grant_kind, pb.grant_id, pb.scope_kind, pb.scope_ref
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            WHERE pb.subject_kind = 'group'
              AND pb.subject_id IN (SELECT group_id FROM policy_groups)"#,
     )
@@ -345,8 +374,8 @@ async fn validate_assignments(pool: &PgPool, assignments: &[Assignment]) -> Resu
 async fn load_rules(pool: &PgPool) -> Result<Vec<Rule>, AppError> {
     use sqlx::Row;
     sqlx::query(
-        r#"SELECT tenant_id, entity_kind, capability_name, object_kind, object_type, decision, is_absolute
-           FROM capability_assignment_rules"#,
+        r#"SELECT tenant_id, entity_kind, action_name AS capability_name, object_kind, object_type, decision, is_absolute
+           FROM action_assignment_rules"#,
     )
     .fetch_all(pool)
     .await
@@ -404,7 +433,7 @@ async fn subject_entity_kinds(
 }
 
 async fn capability_names(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<String>, AppError> {
-    sqlx::query_scalar("SELECT name FROM capabilities WHERE id = ANY($1::uuid[])")
+    sqlx::query_scalar("SELECT name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(ids)
         .fetch_all(pool)
         .await
@@ -414,15 +443,9 @@ async fn capability_names(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<String>, Ap
 async fn role_capability_names(pool: &PgPool, role_id: Uuid) -> Result<Vec<String>, AppError> {
     sqlx::query_scalar(
         r#"SELECT DISTINCT c.name
-           FROM (
-             SELECT $1::uuid AS role_id
-             UNION ALL
-             SELECT child_role_id AS role_id
-             FROM role_composites
-             WHERE parent_role_id = $1
-           ) roles
-           JOIN role_capabilities rc ON rc.role_id = roles.role_id
-           JOIN capabilities c ON c.id = rc.capability_id"#,
+           FROM (SELECT $1::uuid AS role_id) roles
+           JOIN effective_role_actions() rc ON rc.role_id = roles.role_id
+           JOIN actions c ON c.id = rc.capability_id"#,
     )
     .bind(role_id)
     .fetch_all(pool)
@@ -437,7 +460,7 @@ struct RoleCapabilityAssignment {
     object_type: Option<String>,
 }
 
-async fn role_capability_assignments(
+async fn role_permission_assignments(
     pool: &PgPool,
     role_ids: &[Uuid],
 ) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
@@ -447,11 +470,54 @@ async fn role_capability_assignments(
 
     use sqlx::Row;
     sqlx::query(
-        r#"SELECT c.name AS capability_name, r.scope_kind, r.scope_ref
-           FROM roles r
-           JOIN role_capabilities rc ON rc.role_id = r.id
-           JOIN capabilities c ON c.id = rc.capability_id
-           WHERE r.id = ANY($1::uuid[])"#,
+        r#"SELECT a.name AS capability_name,
+                  CASE
+                    WHEN pb.scope_mode = 'platform' THEN 'platform'
+                    WHEN pb.scope_mode = 'tenant' THEN 'tenant'
+                    WHEN pb.scope_mode IN ('object_kind', 'object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_kind
+                    WHEN pb.scope_mode IN ('group', 'group_child_groups', 'group_descendant_groups') THEN 'group'
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(
+                      target_resource.object_kind,
+                      target_entity.object_kind,
+                      target_group.object_kind,
+                      target_tenant.object_kind,
+                      'object'
+                    )
+                    ELSE 'unknown'
+                  END AS object_kind,
+                  CASE
+                    WHEN pb.scope_mode IN ('object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_type
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(
+                      target_resource.object_type,
+                      target_entity.object_type
+                    )
+                    ELSE NULL
+                  END AS object_type
+           FROM role_permission_blocks rpb
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           JOIN actions a ON a.id = pba.action_id
+           LEFT JOIN LATERAL (
+             SELECT 'resource'::text AS object_kind, 'resource:' || kind::text AS object_type
+             FROM resources
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_resource ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT 'entity'::text AS object_kind, 'entity:' || kind::text AS object_type
+             FROM entities
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_entity ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT 'group'::text AS object_kind
+             FROM object_groups
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_group ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT 'tenant'::text AS object_kind
+             FROM tenants
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_tenant ON TRUE
+           WHERE rpb.role_id = ANY($1::uuid[])"#,
     )
     .bind(role_ids)
     .fetch_all(pool)
@@ -459,13 +525,10 @@ async fn role_capability_assignments(
     .map_err(db_err)?
     .into_iter()
     .map(|row| {
-        let scope_kind: ScopeKind = row.try_get("scope_kind").map_err(db_err)?;
-        let scope_ref: Option<String> = row.try_get("scope_ref").map_err(db_err)?;
-        let (object_kind, object_type) = scope_to_object(scope_kind, scope_ref.as_deref());
         Ok(RoleCapabilityAssignment {
             capability_name: row.try_get("capability_name").map_err(db_err)?,
-            object_kind,
-            object_type,
+            object_kind: row.try_get("object_kind").map_err(db_err)?,
+            object_type: row.try_get("object_type").map_err(db_err)?,
         })
     })
     .collect()

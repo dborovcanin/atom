@@ -497,13 +497,13 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
     }
 
     let cap_rows = sqlx::query(
-        r#"SELECT c.id, c.name, c.resource_kind
-           FROM capabilities c
-           JOIN capability_applicability ca ON ca.capability_id = c.id
+        r#"SELECT DISTINCT c.id, c.name
+           FROM actions c
+           JOIN action_applicability ca ON ca.action_id = c.id
            WHERE c.name = $1
              AND ca.object_kind = $2
              AND (ca.object_type IS NULL OR ca.object_type = $3)
-           ORDER BY c.resource_kind NULLS LAST, c.id"#,
+           ORDER BY c.id"#,
     )
     .bind(&req.action)
     .bind(&object.coarse_kind)
@@ -534,9 +534,6 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
     let capability = ExplainCapability {
         id: cap_row.try_get("id").map_err(AppError::Database)?,
         name: cap_row.try_get("name").map_err(AppError::Database)?,
-        resource_kind: cap_row
-            .try_get("resource_kind")
-            .map_err(AppError::Database)?,
     };
 
     let rows = sqlx::query(
@@ -558,7 +555,7 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
                     WHEN pb.subject_kind = 'entity' THEN 'direct'
                     ELSE 'group:' || gp.path
                   END AS via
-           FROM policy_bindings pb
+           FROM effective_access_edges() pb
            LEFT JOIN group_paths gp ON pb.subject_kind = 'group' AND gp.group_id = pb.subject_id
            LEFT JOIN roles role ON pb.grant_kind = 'role' AND role.id = pb.grant_id
            WHERE
@@ -1018,7 +1015,9 @@ fn build_context(
 fn namespaced_object_type(object: &ProtectedObject) -> Value {
     match object.coarse_kind.as_str() {
         "entity" | "resource" => Value::String(format!("{}:{}", object.coarse_kind, object.kind)),
-        "group" | "tenant" | "role" | "policy" | "credential" | "audit_log" => Value::Null,
+        "group" | "tenant" | "role" | "policy" | "credential" | "audit_log" | "signing_key" => {
+            Value::Null
+        }
         _ => Value::Null,
     }
 }
@@ -1664,7 +1663,7 @@ mod db_tests {
             .expect("insert resource");
 
         let read_cap: Uuid =
-            sqlx::query_scalar("SELECT id FROM capabilities WHERE name = 'read' LIMIT 1")
+            sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
                 .fetch_one(&pool)
                 .await
                 .expect("read cap");
