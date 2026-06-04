@@ -115,8 +115,9 @@ pub(crate) async fn resolve_object(
             }
             "entity" => load_entity_as_object(pool, id).await,
             "group" => load_group_as_object(pool, id).await,
+            "credential" => load_credential_as_object(pool, id).await,
             other => Err(AppError::bad_request(format!(
-                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity, group)"
+                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity, group, credential)"
             ))),
         };
     }
@@ -246,6 +247,41 @@ async fn load_group_as_object(
             .unwrap_or(Value::Object(Default::default())),
         parent_group_id,
         ancestor_group_ids,
+    }))
+}
+
+async fn load_credential_as_object(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<ProtectedObject>, AppError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"
+        SELECT c.id, c.kind, c.identifier, c.metadata, e.tenant_id
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(row.map(|row| ProtectedObject {
+        id,
+        coarse_kind: "credential".to_string(),
+        kind: row
+            .try_get::<String, _>("kind")
+            .unwrap_or_else(|_| "credential".to_string()),
+        name: row
+            .try_get::<Option<String>, _>("identifier")
+            .unwrap_or(None),
+        tenant_id: row.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
+        attributes: row
+            .try_get::<Value, _>("metadata")
+            .unwrap_or(Value::Object(Default::default())),
+        parent_group_id: None,
+        ancestor_group_ids: Vec::new(),
     }))
 }
 
@@ -787,6 +823,7 @@ fn object_not_found_reason(req: &AuthzRequest) -> String {
     match req.object_kind.as_deref() {
         Some("tenant") => "tenant not found".to_string(),
         Some("entity") => "entity not found".to_string(),
+        Some("credential") => "credential not found".to_string(),
         Some(kind) => format!("{kind} not found"),
         None => "resource not found".to_string(),
     }

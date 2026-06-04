@@ -153,7 +153,7 @@ Create a tenant-owned entity.
 }
 ```
 
-Create an API key credential for device runtime authentication. The plaintext key is shown once and must be stored by Magistrala only once.
+Create an API key credential or certificate credential for device runtime authentication. API key plaintext and generated certificate private keys are shown once and must be stored by Magistrala only once. CSR-issued certificates do not expose a private key to Atom or Magistrala.
 
 ### Channel
 
@@ -297,6 +297,7 @@ authz.check
 Hybrid action naming:
 
 - stored protected objects use generic actions, for example `read` on `audit_log`, `manage` or `revoke` on `credential`, `create` or `manage` on `tenant`, and `rotate` on `signing_key`;
+- certificate credentials additionally use `read`, `rotate`, `revoke`, and `manage` on `credential`;
 - `role.manage` and `policy.manage` stay explicit because they mean scoped role/member administration for a client, channel, group, rule, report, alarm, or domain;
 - `authz.check` stays explicit because it is an operation, not an object.
 
@@ -425,13 +426,14 @@ List rules in domain -> rules caller can read
 2. Magistrala authenticates to Atom and receives a service token.
 3. On domain creation, Magistrala creates an Atom tenant using the domain UUID.
 4. On user creation, Magistrala creates a global `human` entity and password credential.
-5. On client creation, Magistrala creates a tenant-owned `device` or `service` entity and API key credential.
+5. On client creation, Magistrala creates a tenant-owned `device` or `service` entity and either an API key credential or Atom-issued certificate credential.
 6. On channel/rule/report/alarm creation, Magistrala creates a tenant-owned resource.
 7. On group creation, Magistrala creates an Object Group.
 8. For shared user/service/device access, Magistrala creates a Principal Group.
 9. For access control, Magistrala creates roles with permission blocks and assigns them to entities or Principal Groups.
-10. On every publish, subscribe, read, write, execute, or management operation, Magistrala calls Atom authorization.
-11. For admin UI listings, Magistrala queries Atom with authorization filtering instead of maintaining local access joins.
+10. If a client presents a certificate, the runtime service resolves the certificate serial through Atom gRPC before authorization. The runtime service must authenticate to Atom and hold `authz.check` on the resolved tenant or platform.
+11. On every publish, subscribe, read, write, execute, or management operation, Magistrala calls Atom authorization.
+12. For admin UI listings, Magistrala queries Atom with authorization filtering instead of maintaining local access joins.
 
 ---
 
@@ -458,8 +460,10 @@ Atom owns the security model:
 - sets of users/services/devices are Principal Groups
 - access is roles plus assignments
 - credentials are Atom credentials
+- former Magistrala certs service behavior is Atom certificate credential behavior
+- certificate revocation, CRL, OCSP, and CA chain publication are served by Atom
 - sessions and tokens are Atom authentication
 - decisions and explanations are Atom authorization
 - listings are Atom read-access queries
 
-This avoids a second identity system and avoids duplicating access-control logic inside Magistrala.
+This avoids a second identity system, a separate certificate service, and duplicated access-control logic inside Magistrala.

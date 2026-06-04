@@ -381,8 +381,7 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "create_direct_policy",
       name: "Create Direct Policy",
-      description:
-        "Creates a subject-to-permission-block direct policy.",
+      description: "Creates a subject-to-permission-block direct policy.",
       method: "POST",
       path: "/api/custom/direct-policies",
       operationKind: "mutation",

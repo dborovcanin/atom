@@ -10,6 +10,7 @@ pub struct MutationRoot(
     super::api_endpoints::ApiEndpointMutation,
     super::groups::GroupMutation,
     super::credentials::CredentialMutation,
+    super::certificates::CertificateMutation,
     super::policies::PolicyMutation,
     super::authz::AuthzMutation,
 );

@@ -2,12 +2,14 @@
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  Download,
   Eye,
   EyeOff,
+  FileKey,
   KeyRound,
   Lock,
   Plus,
-  Shield,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 import * as React from "react";
@@ -27,6 +29,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { graphqlClient } from "@/lib/graphql/client";
 import { Action } from "@/lib/utils";
 
@@ -68,6 +71,73 @@ const REVOKE_CREDENTIAL_MUTATION = `
   }
 `;
 
+const ISSUE_CERTIFICATE_MUTATION = `
+  mutation IssueCertificate($input: IssueCertificateInput!) {
+    issueCertificate(input: $input) {
+      certificate {
+        credentialId
+        serialNumber
+        certificatePem
+        expiresAt
+      }
+      privateKeyPem
+    }
+  }
+`;
+
+const ISSUE_CERTIFICATE_FROM_CSR_MUTATION = `
+  mutation IssueCertificateFromCsr($input: IssueCertificateFromCsrInput!) {
+    issueCertificateFromCsr(input: $input) {
+      certificate {
+        credentialId
+        serialNumber
+        certificatePem
+        expiresAt
+      }
+      privateKeyPem
+    }
+  }
+`;
+
+const RENEW_CERTIFICATE_MUTATION = `
+  mutation RenewCertificate($input: RenewCertificateInput!) {
+    renewCertificate(input: $input) {
+      certificate {
+        credentialId
+        serialNumber
+        certificatePem
+        expiresAt
+      }
+      privateKeyPem
+    }
+  }
+`;
+
+const REVOKE_CERTIFICATE_MUTATION = `
+  mutation RevokeCertificate($input: RevokeCertificateInput!) {
+    revokeCertificate(input: $input) {
+      credentialId
+      serialNumber
+      status
+    }
+  }
+`;
+
+const CA_CHAIN_QUERY = `
+  query CaChain {
+    caChain
+  }
+`;
+
+const CERTIFICATE_QUERY = `
+  query Certificate($serialNumber: String!) {
+    certificate(serialNumber: $serialNumber) {
+      serialNumber
+      certificatePem
+    }
+  }
+`;
+
 type Credential = {
   id: string;
   kind: string;
@@ -77,16 +147,39 @@ type Credential = {
   createdAt: string;
 };
 
-type CredentialKind = "password" | "api_key";
+type CredentialKind = "password" | "api_key" | "certificate";
 
 type AddCredentialState =
   | { kind: "password"; password: string; confirm: string }
-  | { kind: "api_key"; description: string; expiresAt: string };
+  | { kind: "api_key"; description: string; expiresAt: string }
+  | {
+      kind: "certificate";
+      commonName: string;
+      dnsNames: string;
+      ipAddresses: string;
+      ttlSecs: string;
+      csrPem: string;
+    };
 
 type ApiKeyResult = {
   credentialId: string;
   key: string;
   expiresAt: string | null;
+};
+
+type CertificateResult = {
+  certificate: {
+    credentialId: string;
+    serialNumber: string;
+    certificatePem: string;
+    expiresAt: string | null;
+  };
+  privateKeyPem: string | null;
+};
+
+type DownloadableCertificate = {
+  serialNumber: string;
+  certificatePem: string;
 };
 
 export function EntityCredentials({ entityId }: { entityId: string }) {
@@ -96,6 +189,8 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
   const [createdApiKey, setCreatedApiKey] = React.useState<ApiKeyResult | null>(
     null,
   );
+  const [createdCertificate, setCreatedCertificate] =
+    React.useState<CertificateResult | null>(null);
   const [showPassword, setShowPassword] = React.useState(false);
   const [form, setForm] = React.useState<AddCredentialState>({
     kind: "password",
@@ -156,6 +251,82 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
     onError: (err) => toast.error(err.message),
   });
 
+  const issueCertificate = useMutation({
+    mutationFn: async (input: {
+      entityId: string;
+      ttlSecs?: number;
+      commonName?: string;
+      dnsNames?: string[];
+      ipAddresses?: string[];
+    }) =>
+      graphqlClient<{ issueCertificate: CertificateResult }>({
+        query: ISSUE_CERTIFICATE_MUTATION,
+        variables: { input },
+      }),
+    onSuccess: (data) => {
+      setCreatedCertificate(data.issueCertificate);
+      setAdding(false);
+      void refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const issueCertificateFromCsr = useMutation({
+    mutationFn: async (input: {
+      entityId: string;
+      ttlSecs?: number;
+      csrPem: string;
+    }) =>
+      graphqlClient<{ issueCertificateFromCsr: CertificateResult }>({
+        query: ISSUE_CERTIFICATE_FROM_CSR_MUTATION,
+        variables: { input },
+      }),
+    onSuccess: (data) => {
+      setCreatedCertificate(data.issueCertificateFromCsr);
+      setAdding(false);
+      void refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const renewCertificate = useMutation({
+    mutationFn: async (serialNumber: string) =>
+      graphqlClient<{ renewCertificate: CertificateResult }>({
+        query: RENEW_CERTIFICATE_MUTATION,
+        variables: { input: { serialNumber } },
+      }),
+    onSuccess: (data) => {
+      setCreatedCertificate(data.renewCertificate);
+      void refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const revokeCertificate = useMutation({
+    mutationFn: async (serialNumber: string) =>
+      graphqlClient({
+        query: REVOKE_CERTIFICATE_MUTATION,
+        variables: { input: { serialNumber } },
+      }),
+    onSuccess: () => {
+      toast.success("Certificate revoked");
+      void refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const downloadCertificate = useMutation({
+    mutationFn: async (serialNumber: string) =>
+      graphqlClient<{ certificate: DownloadableCertificate }>({
+        query: CERTIFICATE_QUERY,
+        variables: { serialNumber },
+      }),
+    onSuccess: (data) => {
+      downloadCertificatePem(data.certificate);
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
   const credentials = data?.credentials.items ?? [];
 
   function handleKindChange(kind: CredentialKind) {
@@ -163,7 +334,16 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
     setForm(
       kind === "password"
         ? { kind: "password", password: "", confirm: "" }
-        : { kind: "api_key", description: "", expiresAt: "" },
+        : kind === "api_key"
+          ? { kind: "api_key", description: "", expiresAt: "" }
+          : {
+              kind: "certificate",
+              commonName: "",
+              dnsNames: "",
+              ipAddresses: "",
+              ttlSecs: "",
+              csrPem: "",
+            },
     );
   }
 
@@ -179,15 +359,45 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
         return;
       }
       createPassword.mutate(form.password);
-    } else {
+    } else if (form.kind === "api_key") {
       const input: { description?: string; expiresAt?: string } = {};
       if (form.description.trim()) input.description = form.description.trim();
       if (form.expiresAt.trim()) input.expiresAt = form.expiresAt.trim();
       createApiKey.mutate(input);
+    } else {
+      const ttlSecs = form.ttlSecs.trim()
+        ? Number.parseInt(form.ttlSecs.trim(), 10)
+        : undefined;
+      if (
+        ttlSecs !== undefined &&
+        (!Number.isFinite(ttlSecs) || ttlSecs <= 0)
+      ) {
+        toast.error("TTL must be a positive number of seconds.");
+        return;
+      }
+      if (form.csrPem.trim()) {
+        issueCertificateFromCsr.mutate({
+          entityId,
+          ttlSecs,
+          csrPem: form.csrPem.trim(),
+        });
+        return;
+      }
+      issueCertificate.mutate({
+        entityId,
+        ttlSecs,
+        commonName: form.commonName.trim() || undefined,
+        dnsNames: splitList(form.dnsNames),
+        ipAddresses: splitList(form.ipAddresses),
+      });
     }
   }
 
-  const isPending = createPassword.isPending || createApiKey.isPending;
+  const isPending =
+    createPassword.isPending ||
+    createApiKey.isPending ||
+    issueCertificate.isPending ||
+    issueCertificateFromCsr.isPending;
 
   return (
     <div className="grid gap-4">
@@ -205,6 +415,13 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
         <ApiKeyRevealBanner
           apiKey={createdApiKey}
           onDismiss={() => setCreatedApiKey(null)}
+        />
+      ) : null}
+
+      {createdCertificate ? (
+        <CertificateRevealBanner
+          certificate={createdCertificate}
+          onDismiss={() => setCreatedCertificate(null)}
         />
       ) : null}
 
@@ -233,6 +450,12 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
                       <span className="flex items-center gap-2">
                         <KeyRound className="size-3.5" />
                         API Key
+                      </span>
+                    </SelectItem>
+                    <SelectItem value="certificate">
+                      <span className="flex items-center gap-2">
+                        <FileKey className="size-3.5" />
+                        Certificate
                       </span>
                     </SelectItem>
                   </SelectGroup>
@@ -292,7 +515,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
                   />
                 </div>
               </>
-            ) : (
+            ) : form.kind === "api_key" ? (
               <>
                 <div className="grid gap-2">
                   <Label htmlFor="cred-description">Description</Label>
@@ -321,6 +544,86 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
                       )
                     }
                     placeholder="No expiry"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="grid gap-2">
+                  <Label htmlFor="cert-common-name">Common name</Label>
+                  <Input
+                    id="cert-common-name"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "certificate"
+                          ? { ...prev, commonName: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="Defaults to entity ID"
+                    value={form.commonName}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="cert-dns">DNS names</Label>
+                  <Input
+                    id="cert-dns"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "certificate"
+                          ? { ...prev, dnsNames: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="Comma-separated DNS SANs"
+                    value={form.dnsNames}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="cert-ips">IP addresses</Label>
+                  <Input
+                    id="cert-ips"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "certificate"
+                          ? { ...prev, ipAddresses: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="Comma-separated IP SANs"
+                    value={form.ipAddresses}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="cert-ttl">TTL seconds</Label>
+                  <Input
+                    id="cert-ttl"
+                    inputMode="numeric"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "certificate"
+                          ? { ...prev, ttlSecs: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="Default"
+                    value={form.ttlSecs}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="cert-csr">CSR PEM</Label>
+                  <Textarea
+                    className="min-h-28 font-mono text-xs"
+                    id="cert-csr"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "certificate"
+                          ? { ...prev, csrPem: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="Paste CSR to sign instead of generating a private key"
+                    value={form.csrPem}
                   />
                 </div>
               </>
@@ -363,14 +666,32 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
               key={cred.id}
               onRevoke={() => {
                 if (
-                  window.confirm(
+                  !window.confirm(
                     "Revoke this credential? This cannot be undone.",
                   )
-                ) {
+                )
+                  return;
+                if (cred.kind === "certificate" && cred.identifier) {
+                  revokeCertificate.mutate(cred.identifier);
+                } else {
                   revokeCredential.mutate(cred.id);
                 }
               }}
-              revoking={revokeCredential.isPending}
+              onRenew={
+                cred.kind === "certificate" && cred.identifier
+                  ? () => renewCertificate.mutate(cred.identifier as string)
+                  : undefined
+              }
+              onDownload={
+                cred.kind === "certificate" && cred.identifier
+                  ? () => downloadCertificate.mutate(cred.identifier as string)
+                  : undefined
+              }
+              revoking={
+                revokeCredential.isPending || revokeCertificate.isPending
+              }
+              renewing={renewCertificate.isPending}
+              downloading={downloadCertificate.isPending}
             />
           ))}
         </div>
@@ -382,11 +703,19 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
 function CredentialRow({
   cred,
   onRevoke,
+  onRenew,
+  onDownload,
   revoking,
+  renewing,
+  downloading,
 }: {
   cred: Credential;
   onRevoke: () => void;
+  onRenew?: () => void;
+  onDownload?: () => void;
   revoking: boolean;
+  renewing: boolean;
+  downloading: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-3 rounded-lg border bg-background p-3">
@@ -422,16 +751,40 @@ function CredentialRow({
         </div>
       </div>
       {cred.status === "active" ? (
-        <Button
-          disabled={revoking}
-          onClick={onRevoke}
-          size="sm"
-          variant="ghost"
-          className="shrink-0 text-destructive hover:text-destructive"
-        >
-          <Trash2 className="size-3.5" />
-          <span className="sr-only">Revoke</span>
-        </Button>
+        <div className="flex shrink-0 gap-1">
+          {onDownload ? (
+            <Button
+              disabled={downloading}
+              onClick={onDownload}
+              size="sm"
+              variant="ghost"
+            >
+              <Download className="size-3.5" />
+              <span className="sr-only">Download certificate</span>
+            </Button>
+          ) : null}
+          {onRenew ? (
+            <Button
+              disabled={renewing}
+              onClick={onRenew}
+              size="sm"
+              variant="ghost"
+            >
+              <RefreshCw className="size-3.5" />
+              <span className="sr-only">Renew</span>
+            </Button>
+          ) : null}
+          <Button
+            disabled={revoking}
+            onClick={onRevoke}
+            size="sm"
+            variant="ghost"
+            className="text-destructive hover:text-destructive"
+          >
+            <Trash2 className="size-3.5" />
+            <span className="sr-only">Revoke</span>
+          </Button>
+        </div>
       ) : null}
     </div>
   );
@@ -447,7 +800,7 @@ function CredentialKindIcon({ kind }: { kind: string }) {
       );
     default:
       return (
-        <Shield className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <FileKey className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       );
   }
 }
@@ -506,4 +859,100 @@ function ApiKeyRevealBanner({
       </Button>
     </div>
   );
+}
+
+function CertificateRevealBanner({
+  certificate,
+  onDismiss,
+}: {
+  certificate: CertificateResult;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-800 dark:bg-emerald-950">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-sm font-medium text-emerald-900 dark:text-emerald-100">
+          Certificate issued
+        </div>
+        <Badge variant="outline" className="text-xs">
+          {certificate.privateKeyPem ? "key shown once" : "CSR signed"}
+        </Badge>
+      </div>
+      <div className="mb-3 grid gap-2">
+        <code className="break-all rounded bg-emerald-100 px-2 py-1 font-mono text-xs text-emerald-950 dark:bg-emerald-900 dark:text-emerald-100">
+          {certificate.certificate.serialNumber}
+        </code>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={() =>
+              downloadCertificatePem({
+                serialNumber: certificate.certificate.serialNumber,
+                certificatePem: certificate.certificate.certificatePem,
+              })
+            }
+            size="sm"
+            variant="outline"
+          >
+            <Download data-icon="inline-start" className="size-3.5" />
+            Certificate
+          </Button>
+          {certificate.privateKeyPem ? (
+            <Button
+              onClick={() =>
+                downloadText(
+                  `atom-cert-${certificate.certificate.serialNumber}-key.pem`,
+                  certificate.privateKeyPem ?? "",
+                )
+              }
+              size="sm"
+              variant="outline"
+            >
+              <Download data-icon="inline-start" className="size-3.5" />
+              Private key
+            </Button>
+          ) : null}
+          <Button onClick={downloadCaChain} size="sm" variant="outline">
+            <Download data-icon="inline-start" className="size-3.5" />
+            CA chain
+          </Button>
+        </div>
+      </div>
+      <Button onClick={onDismiss} size="sm" variant="outline">
+        Dismiss
+      </Button>
+    </div>
+  );
+}
+
+function splitList(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function downloadText(filename: string, contents: string) {
+  const blob = new Blob([contents], { type: "application/x-pem-file" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadCertificatePem(certificate: DownloadableCertificate) {
+  downloadText(
+    `atom-cert-${certificate.serialNumber}.pem`,
+    certificate.certificatePem,
+  );
+}
+
+async function downloadCaChain() {
+  const data = await graphqlClient<{ caChain: string }>({
+    query: CA_CHAIN_QUERY,
+  });
+  downloadText("atom-ca-chain.pem", data.caChain);
 }

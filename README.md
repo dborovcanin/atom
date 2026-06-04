@@ -26,6 +26,7 @@ This README is the quickstart and orientation document. It should not duplicate 
 - Product source of truth: [product-docs/PRD.md](product-docs/PRD.md)
 - Access model source of truth: [product-docs/11-access-model-simplification.md](product-docs/11-access-model-simplification.md)
 - Magistrala integration source of truth: [product-docs/10-magistrala-on-atom.md](product-docs/10-magistrala-on-atom.md)
+- Certificate lifecycle source of truth: [product-docs/12-certificates.md](product-docs/12-certificates.md)
 
 Do not use older terminology such as Capability, Policy Binding, `role_capabilities`, or `scopeKind/scopeRef` as the product model. Atom now uses Actions, Permission Blocks, Roles, Role Assignments, Direct Policies, Principal Groups, and Object Groups.
 
@@ -115,6 +116,7 @@ Object Group           = where
 # 1. Copy and edit config
 cp .env.example .env
 # set ADMIN_SECRET on first boot to create the admin password
+# set ATOM_CERTS_KEY_ENCRYPTION_SECRET when ATOM_CERTS_ENABLED=true
 
 # 2. Start Postgres
 docker-compose up postgres -d
@@ -135,6 +137,8 @@ docker compose --profile atom-ui up -d --build
 The service starts on `http://localhost:8080`.
 
 GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Bearer token authentication as REST.
+
+Certificate support is enabled by default. `ATOM_CERTS_KEY_ENCRYPTION_SECRET` must be at least 32 random bytes when enabled; Atom uses it to encrypt internal CA private keys in Postgres. Public PKI endpoints are available at `GET /certs/ca-chain`, `GET /certs/crl`, and `POST /certs/ocsp`.
 
 The Atom Next UI is a separate optional service. In Docker Compose it is enabled with the `atom-ui` profile and is available at `http://localhost:3005`.
 

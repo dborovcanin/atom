@@ -72,14 +72,20 @@ export function RoleCapabilitiesPanel({ roleId }: { roleId: string }) {
           {permissionBlocks.map((block) => (
             <div className="grid gap-2 rounded-md border p-2" key={block.id}>
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={block.effect === "deny" ? "destructive" : "secondary"}>
+                <Badge
+                  variant={
+                    block.effect === "deny" ? "destructive" : "secondary"
+                  }
+                >
                   {block.effect}
                 </Badge>
                 <span className="text-sm font-medium">{scopeLabel(block)}</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {block.actions.length === 0 ? (
-                  <span className="text-sm text-muted-foreground">No actions</span>
+                  <span className="text-sm text-muted-foreground">
+                    No actions
+                  </span>
                 ) : (
                   block.actions.map((action) => (
                     <Badge
@@ -129,4 +135,3 @@ function scopeLabel(block: PermissionBlock) {
       return block.scopeMode;
   }
 }
-

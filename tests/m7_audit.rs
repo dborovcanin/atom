@@ -195,6 +195,14 @@ async fn successful_login_emits_auth_login_allow_with_entity_id() {
         invitation_expiry_secs: 604_800,
         oauth_state_expiry_secs: 600,
         auth_exchange_code_expiry_secs: 300,
+        certs_enabled: false,
+        certs_key_encryption_secret: None,
+        certs_root_ttl_secs: 315_360_000,
+        certs_intermediate_ttl_secs: 157_680_000,
+        certs_leaf_default_ttl_secs: 2_592_000,
+        certs_leaf_max_ttl_secs: 2_592_000,
+        certs_root_common_name: "Atom Root CA".into(),
+        certs_intermediate_common_name: "Atom Intermediate CA".into(),
     };
 
     let resp = service::login_password(

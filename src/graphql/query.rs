@@ -10,6 +10,7 @@ pub struct QueryRoot(
     super::api_endpoints::ApiEndpointQuery,
     super::groups::GroupQuery,
     super::credentials::CredentialQuery,
+    super::certificates::CertificateQuery,
     super::authz::AuthzQuery,
     super::policies::PolicyQuery,
     super::admin::AdminQuery,

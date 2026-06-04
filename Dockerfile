@@ -1,5 +1,5 @@
 FROM rust:1.89-alpine AS base
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev protobuf-dev
+RUN apk add --no-cache build-base cmake musl-dev openssl-dev perl pkgconfig protobuf-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs

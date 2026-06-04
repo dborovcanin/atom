@@ -144,7 +144,10 @@ export function PolicyCreateForm({
   });
 
   const groupsQ = useQuery({
-    queryKey: ["direct-policy-form-principal-groups", draft.tenantId || "platform"],
+    queryKey: [
+      "direct-policy-form-principal-groups",
+      draft.tenantId || "platform",
+    ],
     queryFn: ({ signal }) =>
       graphqlClient<{ principalGroups: { items: GroupOption[] } }>({
         query: PRINCIPAL_GROUPS_QUERY,
@@ -155,7 +158,10 @@ export function PolicyCreateForm({
   });
 
   const permissionBlocksQ = useQuery({
-    queryKey: ["direct-policy-form-permission-blocks", draft.tenantId || "platform"],
+    queryKey: [
+      "direct-policy-form-permission-blocks",
+      draft.tenantId || "platform",
+    ],
     queryFn: ({ signal }) =>
       graphqlClient<{ permissionBlocks: { items: PermissionBlockOption[] } }>({
         query: PERMISSION_BLOCKS_QUERY,
@@ -170,7 +176,9 @@ export function PolicyCreateForm({
   const groups = groupsQ.data?.principalGroups.items ?? [];
   const permissionBlocks = permissionBlocksQ.data?.permissionBlocks.items ?? [];
   const subjects = draft.subjectKind === "entity" ? entities : groups;
-  const selectedSubject = subjects.find((subject) => subject.id === draft.subjectId);
+  const selectedSubject = subjects.find(
+    (subject) => subject.id === draft.subjectId,
+  );
   const selectedBlock = permissionBlocks.find(
     (block) => block.id === draft.permissionBlockId,
   );
@@ -195,7 +203,9 @@ export function PolicyCreateForm({
       }
     },
     onSuccess: () => {
-      toast.success(isEditing ? "Direct policy replaced" : "Direct policy created");
+      toast.success(
+        isEditing ? "Direct policy replaced" : "Direct policy created",
+      );
       onSaved();
     },
     onError: (error) => toast.error(error.message),
@@ -348,8 +358,8 @@ export function PolicyCreateForm({
         <div className="grid gap-3 rounded-lg border bg-background p-4">
           <ReviewRow label="Tenant">
             {draft.tenantId
-              ? tenants.find((tenant) => tenant.id === draft.tenantId)?.name ??
-                draft.tenantId
+              ? (tenants.find((tenant) => tenant.id === draft.tenantId)?.name ??
+                draft.tenantId)
               : "Platform"}
           </ReviewRow>
           <ReviewRow label="Subject">
@@ -388,11 +398,7 @@ export function PolicyCreateForm({
             Next
           </Button>
         ) : (
-          <Button
-            disabled={savePolicy.isPending}
-            type="button"
-            onClick={save}
-          >
+          <Button disabled={savePolicy.isPending} type="button" onClick={save}>
             {savePolicy.isPending
               ? "Saving…"
               : isEditing
@@ -505,4 +511,3 @@ function scopeLabel(block: PermissionBlockOption) {
       return block.scopeMode;
   }
 }
-

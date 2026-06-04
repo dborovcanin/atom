@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api_endpoints;
 pub mod auth;
 pub mod authz;
+pub mod certificates;
 pub mod credentials;
 pub mod entities;
 pub mod groups;

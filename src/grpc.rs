@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    auth::{authenticate_token, AuthContext},
+    auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
     authz::{access, engine},
+    certs,
     models::{enums::AuditOutcome, policy::AuthzRequest},
     state::AppState,
 };
@@ -19,7 +20,10 @@ pub mod proto {
 use proto::{
     auth_service_server::{AuthService, AuthServiceServer},
     authz_service_server::{AuthzService, AuthzServiceServer},
+    certificate_service_server::{CertificateService, CertificateServiceServer},
     AuthenticateRequest, AuthenticateResponse, CheckRequest, CheckResponse,
+    ResolveCertificateRequest, ResolveCertificateResponse, RevokeEntityCertificatesRequest,
+    RevokeEntityCertificatesResponse,
 };
 
 // ─── AuthzService ─────────────────────────────────────────────────────────────
@@ -163,6 +167,93 @@ impl AuthService for AtomAuth {
     }
 }
 
+// ─── CertificateService ──────────────────────────────────────────────────────
+
+struct AtomCertificates {
+    state: AppState,
+}
+
+#[tonic::async_trait]
+impl CertificateService for AtomCertificates {
+    async fn resolve_certificate(
+        &self,
+        request: Request<ResolveCertificateRequest>,
+    ) -> Result<Response<ResolveCertificateResponse>, Status> {
+        let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
+        let req = request.into_inner();
+        let identity = certs::service::resolve_certificate_identity(
+            &self.state.pool,
+            &req.serial_number,
+            (!req.fingerprint_sha256.is_empty()).then_some(req.fingerprint_sha256.as_str()),
+        )
+        .await
+        .map_err(Status::from)?;
+        require_any_capability(
+            &self.state.pool,
+            auth.entity_id,
+            &[
+                ("authz.check", scope_for_tenant(identity.tenant_id)),
+                ("authz.check", Scope::Platform),
+            ],
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Response::new(ResolveCertificateResponse {
+            entity_id: identity.entity_id.to_string(),
+            tenant_id: identity
+                .tenant_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            credential_id: identity.credential_id.to_string(),
+            expires_at: identity.expires_at.to_rfc3339(),
+        }))
+    }
+
+    async fn revoke_entity_certificates(
+        &self,
+        request: Request<RevokeEntityCertificatesRequest>,
+    ) -> Result<Response<RevokeEntityCertificatesResponse>, Status> {
+        let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
+        let req = request.into_inner();
+        let entity_id = Uuid::parse_str(&req.entity_id)
+            .map_err(|_| Status::invalid_argument("invalid entity_id: expected UUID"))?;
+        let tenant_id = certs::repo::entity_tenant_id(&self.state.pool, entity_id)
+            .await
+            .map_err(Status::from)?;
+        require_any_capability(
+            &self.state.pool,
+            auth.entity_id,
+            &[
+                ("manage", Scope::Object(entity_id)),
+                ("manage", scope_for_tenant(tenant_id)),
+            ],
+        )
+        .await
+        .map_err(Status::from)?;
+        let revoked = certs::service::revoke_entity_certificates(
+            &self.state.pool,
+            entity_id,
+            (!req.reason.is_empty()).then_some(req.reason),
+        )
+        .await
+        .map_err(Status::from)?;
+        audit::write(
+            &self.state.pool,
+            Some(auth.entity_id),
+            tenant_id,
+            "certificate.revoke_entity",
+            AuditOutcome::Allow,
+            serde_json::json!({"entity_id": entity_id, "count": revoked, "transport": "grpc"}),
+        )
+        .await;
+
+        Ok(Response::new(RevokeEntityCertificatesResponse {
+            revoked: revoked as u64,
+        }))
+    }
+}
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
@@ -172,7 +263,10 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
         .add_service(AuthzServiceServer::new(AtomAuthz {
             state: state.clone(),
         }))
-        .add_service(AuthServiceServer::new(AtomAuth { state }))
+        .add_service(AuthServiceServer::new(AtomAuth {
+            state: state.clone(),
+        }))
+        .add_service(CertificateServiceServer::new(AtomCertificates { state }))
         .serve(addr)
         .await?;
 

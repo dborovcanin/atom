@@ -1,4 +1,4 @@
-use atom::{config, db, grpc, identity, keys, routes, state};
+use atom::{certs, config, db, grpc, identity, keys, routes, state};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     keys::bootstrap_if_needed(&pool).await?;
+    certs::service::bootstrap_if_needed(&pool, &cfg).await?;
     let active_keys = keys::load_active_keys(&pool).await?;
 
     let state = state::AppState::new(pool, cfg.clone(), active_keys);

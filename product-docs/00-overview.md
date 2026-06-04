@@ -120,3 +120,4 @@ Each endpoint is specified in its own document:
 9. [Admin hygiene endpoints](./09-admin-hygiene.md)
 10. [Building Magistrala on Atom](./10-magistrala-on-atom.md)
 11. [Atom access model](./11-access-model-simplification.md)
+12. [Atom certificates](./12-certificates.md)

@@ -40,6 +40,14 @@ pub struct Config {
     pub invitation_expiry_secs: u64,
     pub oauth_state_expiry_secs: u64,
     pub auth_exchange_code_expiry_secs: u64,
+    pub certs_enabled: bool,
+    pub certs_key_encryption_secret: Option<String>,
+    pub certs_root_ttl_secs: u64,
+    pub certs_intermediate_ttl_secs: u64,
+    pub certs_leaf_default_ttl_secs: u64,
+    pub certs_leaf_max_ttl_secs: u64,
+    pub certs_root_common_name: String,
+    pub certs_intermediate_common_name: String,
 }
 
 impl Config {
@@ -89,6 +97,16 @@ impl Config {
             invitation_expiry_secs: env_u64("ATOM_INVITATION_EXPIRY_SECS", 604_800),
             oauth_state_expiry_secs: env_u64("ATOM_OAUTH_STATE_EXPIRY_SECS", 600),
             auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
+            certs_enabled: env_bool_default("ATOM_CERTS_ENABLED", true),
+            certs_key_encryption_secret: std::env::var("ATOM_CERTS_KEY_ENCRYPTION_SECRET").ok(),
+            certs_root_ttl_secs: env_u64("ATOM_CERTS_ROOT_TTL_SECS", 315_360_000),
+            certs_intermediate_ttl_secs: env_u64("ATOM_CERTS_INTERMEDIATE_TTL_SECS", 157_680_000),
+            certs_leaf_default_ttl_secs: env_u64("ATOM_CERTS_LEAF_DEFAULT_TTL_SECS", 2_592_000),
+            certs_leaf_max_ttl_secs: env_u64("ATOM_CERTS_LEAF_MAX_TTL_SECS", 2_592_000),
+            certs_root_common_name: std::env::var("ATOM_CERTS_ROOT_COMMON_NAME")
+                .unwrap_or_else(|_| "Atom Root CA".to_string()),
+            certs_intermediate_common_name: std::env::var("ATOM_CERTS_INTERMEDIATE_COMMON_NAME")
+                .unwrap_or_else(|_| "Atom Intermediate CA".to_string()),
             public_base_url,
         })
     }
@@ -130,6 +148,17 @@ fn env_bool(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn env_bool_default(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

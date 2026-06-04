@@ -36,16 +36,14 @@ type PermissionBlock = {
 export function PolicyInspectDetails({ row }: { row: Row | null }) {
   const [copied, setCopied] = React.useState(false);
 
-  if (!row) return null;
-
-  const id = String(row.id ?? "");
-  const tenantId = row.tenantId ? String(row.tenantId) : "";
-  const subjectKind = String(row.subjectKind ?? "");
-  const subjectId = String(row.subjectId ?? "");
-  const permissionBlockId = String(row.permissionBlockId ?? "");
+  const id = row ? String(row.id ?? "") : "";
+  const tenantId = row?.tenantId ? String(row.tenantId) : "";
+  const subjectKind = row ? String(row.subjectKind ?? "") : "";
+  const subjectId = row ? String(row.subjectId ?? "") : "";
+  const permissionBlockId = row ? String(row.permissionBlockId ?? "") : "";
 
   const entityQ = useQuery({
-    enabled: subjectKind === "entity" && Boolean(subjectId),
+    enabled: Boolean(row) && subjectKind === "entity" && Boolean(subjectId),
     queryKey: ["direct-policy-inspect-entity", subjectId],
     queryFn: ({ signal }) =>
       graphqlClient<{ entity: { id: string; name: string; kind: string } }>({
@@ -57,7 +55,7 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
   });
 
   const groupQ = useQuery({
-    enabled: subjectKind === "group" && Boolean(subjectId),
+    enabled: Boolean(row) && subjectKind === "group" && Boolean(subjectId),
     queryKey: ["direct-policy-inspect-group", subjectId],
     queryFn: ({ signal }) =>
       graphqlClient<{
@@ -71,7 +69,7 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
   });
 
   const blockQ = useQuery({
-    enabled: Boolean(permissionBlockId),
+    enabled: Boolean(row) && Boolean(permissionBlockId),
     queryKey: ["direct-policy-inspect-permission-block", permissionBlockId],
     queryFn: ({ signal }) =>
       graphqlClient<{ permissionBlock: PermissionBlock }>({
@@ -92,6 +90,8 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
       setTimeout(() => setCopied(false), 2000);
     });
   }
+
+  if (!row) return null;
 
   return (
     <div className="grid gap-4">
@@ -157,7 +157,9 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
         {block ? (
           <div className="grid gap-2">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={block.effect === "deny" ? "destructive" : "secondary"}>
+              <Badge
+                variant={block.effect === "deny" ? "destructive" : "secondary"}
+              >
                 {block.effect}
               </Badge>
               <span className="text-sm">{scopeLabel(block)}</span>
@@ -235,4 +237,3 @@ function scopeLabel(block: PermissionBlock) {
       return block.scopeMode;
   }
 }
-

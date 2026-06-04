@@ -9,7 +9,7 @@ use tower_http::{
 };
 
 use crate::{
-    api_endpoints::handlers as api_endpoints, graphql, identity::handlers as identity, keys,
+    api_endpoints::handlers as api_endpoints, certs, graphql, identity::handlers as identity, keys,
     state::AppState,
 };
 
@@ -41,6 +41,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/.well-known/jwks.json", get(keys::jwks))
         // Health
         .route("/health", get(identity::health))
+        // Public PKI artifacts
+        .route("/certs/ca-chain", get(certs::http::ca_chain))
+        .route("/certs/crl", get(certs::http::crl))
+        .route("/certs/ocsp", post(certs::http::ocsp))
         // GraphQL
         .route("/graphql", post(graphql::graphql_handler))
         // Custom API endpoint executor
@@ -238,6 +242,14 @@ mod tests {
             invitation_expiry_secs: 604_800,
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
+            certs_enabled: false,
+            certs_key_encryption_secret: None,
+            certs_root_ttl_secs: 315_360_000,
+            certs_intermediate_ttl_secs: 157_680_000,
+            certs_leaf_default_ttl_secs: 2_592_000,
+            certs_leaf_max_ttl_secs: 2_592_000,
+            certs_root_common_name: "Atom Root CA".into(),
+            certs_intermediate_common_name: "Atom Intermediate CA".into(),
         };
         let primary = LoadedKey {
             kid: "test".into(),

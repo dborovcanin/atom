@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Check, Link2, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 import { useTenant } from "@/components/app-shell/tenant-provider";
@@ -198,7 +198,8 @@ export function RoleCreateForm({
   }, [role?.id, roleDetailQuery.data]);
 
   const tenants = tenantsQuery.data?.tenants.items ?? [];
-  const permissionBlocks = permissionBlocksQuery.data?.permissionBlocks.items ?? [];
+  const permissionBlocks =
+    permissionBlocksQuery.data?.permissionBlocks.items ?? [];
   const selectedBlocks = permissionBlocks.filter((block) =>
     draft.permissionBlockIds.includes(block.id),
   );
@@ -425,8 +426,8 @@ export function RoleCreateForm({
         <div className="grid gap-3 rounded-lg border bg-background p-4">
           <ReviewRow label="Tenant">
             {draft.tenantId
-              ? tenants.find((tenant) => tenant.id === draft.tenantId)?.name ??
-                draft.tenantId
+              ? (tenants.find((tenant) => tenant.id === draft.tenantId)?.name ??
+                draft.tenantId)
               : "Platform"}
           </ReviewRow>
           <ReviewRow label="Name">{draft.name || "—"}</ReviewRow>
@@ -576,4 +577,3 @@ function scopeLabel(block: PermissionBlockOption) {
       return block.scopeMode;
   }
 }
-

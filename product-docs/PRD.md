@@ -23,7 +23,7 @@ Atom provides three main product areas:
    - Principal Groups: collections of identities used for shared access;
    - resources: protected application objects such as channels;
    - roles: reusable permission sets;
-   - credentials: passwords, API keys, and future credential types;
+   - credentials: passwords, API keys, and Atom-issued certificates;
    - ownerships: parent-child relationships between entities.
 
 2. **Authentication**
@@ -77,7 +77,7 @@ The current project needs a single PRD because product intent must not be spread
 
 1. Provide a compact identity and authorization service that is simple to deploy, operate, and reason about.
 2. Support humans, devices, services, workloads, and applications using one consistent entity model.
-3. Support password login, JWT sessions, API keys, and future credential types without changing the core entity model.
+3. Support password login, JWT sessions, API keys, and certificate credentials without changing the core entity model.
 4. Provide role-based authorization with assignments, optional ABAC conditions, trusted Direct Policies, and deny-overrides semantics.
 5. Make tenants first-class isolation boundaries, with Magistrala domains mapping directly to Atom tenants.
 6. Keep authorization online: every access decision is evaluated against current database state.
@@ -381,7 +381,7 @@ atom_<32-hex-credential-id>_<64-hex-secret>
 
 The plaintext API key is revealed once and must not be recoverable later.
 
-Certificate credentials are schema-supported but behavior-deferred for now. The MVP should not build full certificate issuance, verification, rotation, or mTLS identity flows. Full certificate credentials remain a future extension.
+Certificate credentials are first-class Atom credentials. Atom owns certificate issuance, CSR signing, renewal, revocation, entity-wide revocation, CA chain publication, CRL publication, OCSP responses, and runtime certificate identity lookup. Certificates are issued by Atom's internal CA; the CA private keys are encrypted before storage in Postgres using a configured key-encryption secret. Issued leaf certificate PEM is stored on the certificate credential and may be retrieved by authorized callers. Generated leaf private keys are revealed once and must not be recoverable later. CSR-issued private keys are never known to Atom. Certificate fingerprints are computed over certificate DER, not PEM text.
 
 Credential management authority follows the entity's `tenant_id`, not tenant membership:
 
@@ -974,7 +974,16 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AUTH-8 | Signing keys must be rotatable through a manage-protected endpoint. | Should |
 | AUTH-9 | Tenant admins may manage credentials for tenant-scoped entities in their tenant. | Must |
 | AUTH-10 | Tenant admins must not manage credentials for any entity not owned by their tenant, including global entities (`tenant_id = null`), entities owned by other tenants, and platform admins. Platform policy may explicitly delegate credential authority over a specific entity to a specific tenant admin. | Must |
-| AUTH-11 | Certificate credentials should remain schema-supported but behavior-deferred for now. | Should |
+| AUTH-11 | The system must support Atom-issued certificate credentials backed by an internal CA. | Must |
+| AUTH-12 | CA private keys must be encrypted before storage in Postgres. | Must |
+| AUTH-13 | The system must support generated leaf certificates with one-time private key reveal. | Must |
+| AUTH-14 | The system must support CSR signing without storing or returning a private key. | Must |
+| AUTH-15 | The system must support certificate renewal, serial revocation, entity-wide certificate revocation, CRL publication, OCSP responses, and CA chain publication. | Must |
+| AUTH-16 | Runtime services must be able to resolve a certificate serial to an active Atom entity through Atom's runtime API. | Must |
+| AUTH-17 | Certificate TTL requests greater than the configured maximum must be rejected. | Must |
+| AUTH-18 | CSR-issued certificates must always be non-CA client-auth leaf certificates regardless of requested CSR extensions. | Must |
+| AUTH-19 | OCSP responses must validate issuer hashes and return `unknown` for mismatched issuers. | Must |
+| AUTH-20 | CRL responses must be cached and regenerated only when revocation state changes or the CRL expires. | Must |
 
 ### Tenants
 
@@ -1120,6 +1129,7 @@ Atom must expose these API categories:
 - Authentication: login, logout, session read, JWKS, signing key rotation.
 - Entities: entity CRUD and Principal Group membership views.
 - Credentials: password creation, API key creation, credential listing, credential revocation.
+- Certificates: certificate issuance, CSR signing, renewal, revocation, entity-wide revocation, CA chain, CRL, OCSP, and runtime certificate identity lookup.
 - Tenants: tenant CRUD and lifecycle transitions.
 - Object Groups: boundary CRUD, hierarchy, and object containment management.
 - Principal Groups: principal collection CRUD and membership management.
@@ -1148,6 +1158,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 10. [Admin hygiene endpoints](./09-admin-hygiene.md)
 11. [Building Magistrala on Atom](./10-magistrala-on-atom.md)
 12. [Atom access model](./11-access-model-simplification.md)
+13. [Atom certificates](./12-certificates.md)
 
 ---
 
@@ -1164,9 +1175,12 @@ Detailed endpoint requirements are maintained in the linked product docs:
 
 - Secrets must be hashed with argon2.
 - JWTs must be signed and verifiable through published keys.
+- CA private keys must be encrypted before they are stored.
+- Atom must fail startup when certificate support is enabled without a valid CA key-encryption secret.
 - Management endpoints must require a manage-capable caller.
 - Authorization must be denied by default.
 - API keys must not be recoverable after creation.
+- Issued certificate private keys must not be recoverable after creation.
 
 ### Reliability
 
@@ -1180,6 +1194,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 - Authorization checks must avoid per-assignment Permission Block queries.
 - Role permission blocks and actions must be batch-loaded for authorization evaluation.
 - API key authentication must avoid full credential-table scans by using the embedded credential ID.
+- CRL generation must be concurrency-safe across Atom replicas.
 - List endpoints must support pagination.
 
 ### Compatibility
@@ -1198,7 +1213,7 @@ Atom is successful when:
 - Magistrala can model domains, users, clients, channels, Object Groups, Principal Groups, roles, and permissions without a separate auth database.
 - Runtime services can answer authorization decisions through Atom with deterministic deny-by-default behavior.
 - Operators can answer "why denied?", "who can access this?", and "what can this entity access?" without direct SQL.
-- Credential creation, revocation, and audit inspection can be done through APIs.
+- Credential creation, certificate issuance, revocation, runtime certificate lookup, and audit inspection can be done through APIs.
 - Tenants can represent Magistrala domain lifecycle states.
 - The service can be deployed with Postgres and a small set of environment variables.
 
@@ -1246,6 +1261,7 @@ Atom is successful when:
 - Magistrala domain-to-tenant mapping
 - Magistrala integration guide
 - HTTP/OpenAPI and gRPC contract updates
+- Atom-native certificate credential lifecycle
 
 ### Phase 4: Action assignment guardrails
 
@@ -1263,7 +1279,6 @@ Atom is successful when:
 - SCIM provisioning
 - OIDC federation
 - Workload identity with SPIFFE or X.509
-- Full certificate credential lifecycle
 - Token introspection
 - Audit webhooks
 - Prometheus metrics

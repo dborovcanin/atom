@@ -12,8 +12,8 @@ import {
 } from "@/components/ui/select";
 import {
   applicabilityValues,
-  capabilityLabel,
   type CapabilityApplicability,
+  capabilityLabel,
 } from "@/lib/access/capabilities";
 
 export type PickerCapability = {
@@ -66,9 +66,7 @@ export function CapabilityPicker({
           ))}
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
-          No actions selected.
-        </p>
+        <p className="text-xs text-muted-foreground">No actions selected.</p>
       )}
       {availableCaps.length > 0 && (
         <Select

@@ -1,5 +1,5 @@
-import type { Metadata } from "next";
 import { AlertTriangle } from "lucide-react";
+import type { Metadata } from "next";
 import { CrudWorkspace } from "@/components/crud/crud-workspace";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 

@@ -159,7 +159,10 @@ export function CapabilityActionCreateForm({
             <FormItem>
               <FormLabel>description</FormLabel>
               <FormControl>
-                <Input placeholder="e.g. Publish messages to channels" {...field} />
+                <Input
+                  placeholder="e.g. Publish messages to channels"
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -259,8 +262,8 @@ export function CapabilityApplicabilityCreateForm({
                 </SelectContent>
               </Select>
               <FormDescription>
-                References `actions.id`. Create the action first if it
-                does not exist yet.
+                References `actions.id`. Create the action first if it does not
+                exist yet.
               </FormDescription>
               <FormMessage />
             </FormItem>
@@ -273,7 +276,10 @@ export function CapabilityApplicabilityCreateForm({
           render={({ field }) => (
             <FormItem>
               <RequiredFormLabel required>object_kind</RequiredFormLabel>
-              <Select onValueChange={field.onChange} value={field.value || undefined}>
+              <Select
+                onValueChange={field.onChange}
+                value={field.value || undefined}
+              >
                 <FormControl>
                   <SelectTrigger className="w-full">
                     <SelectValue placeholder="Select object_kind" />

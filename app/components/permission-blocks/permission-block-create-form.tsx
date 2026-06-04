@@ -116,7 +116,8 @@ const SCOPE_MODES = [
   {
     value: "object",
     label: "Exact object",
-    description: "Applies to one entity, resource, group, tenant, role, or policy.",
+    description:
+      "Applies to one entity, resource, group, tenant, role, or policy.",
   },
   {
     value: "group",
@@ -131,7 +132,8 @@ const SCOPE_MODES = [
   {
     value: "group_descendant_objects",
     label: "Objects in subgroups",
-    description: "Applies to clients/channels inside child or deeper groups only.",
+    description:
+      "Applies to clients/channels inside child or deeper groups only.",
   },
   {
     value: "group_child_groups",
@@ -245,7 +247,9 @@ export function PermissionBlockCreateForm({
     draft.actionIds.includes(action.id),
   );
   const selectedTenant = tenants.find((tenant) => tenant.id === draft.tenantId);
-  const selectedGroup = objectGroups.find((group) => group.id === draft.groupId);
+  const selectedGroup = objectGroups.find(
+    (group) => group.id === draft.groupId,
+  );
 
   React.useEffect(() => {
     setDraft((prev) => ({
@@ -380,7 +384,9 @@ export function PermissionBlockCreateForm({
               </SelectTrigger>
               <SelectContent>
                 {SCOPE_MODES.filter((mode) =>
-                  draft.tenantId ? mode.value !== "platform" : mode.value === "platform",
+                  draft.tenantId
+                    ? mode.value !== "platform"
+                    : mode.value === "platform",
                 ).map((mode) => (
                   <SelectItem key={mode.value} value={mode.value}>
                     <span className="grid gap-0.5">
@@ -505,7 +511,9 @@ export function PermissionBlockCreateForm({
         <Field label="Actions">
           <div className="max-h-96 overflow-y-auto rounded-md border">
             {actionsQ.isFetching ? (
-              <p className="p-4 text-sm text-muted-foreground">Loading actions...</p>
+              <p className="p-4 text-sm text-muted-foreground">
+                Loading actions...
+              </p>
             ) : actions.length === 0 ? (
               <p className="p-4 text-sm text-muted-foreground">
                 No actions are applicable to this scope yet.
@@ -514,13 +522,16 @@ export function PermissionBlockCreateForm({
               <div className="grid divide-y">
                 {actions.map((action) => {
                   const checked = draft.actionIds.includes(action.id);
+                  const checkboxId = `permission-block-action-${action.id}`;
                   return (
                     <label
                       className="flex cursor-pointer items-start gap-3 p-3 hover:bg-muted/50"
+                      htmlFor={checkboxId}
                       key={action.id}
                     >
                       <Checkbox
                         checked={checked}
+                        id={checkboxId}
                         onCheckedChange={(next) =>
                           setDraft((prev) => ({
                             ...prev,
@@ -531,7 +542,9 @@ export function PermissionBlockCreateForm({
                         }
                       />
                       <span className="grid gap-1">
-                        <span className="font-medium text-sm">{action.name}</span>
+                        <span className="font-medium text-sm">
+                          {action.name}
+                        </span>
                         {action.description ? (
                           <span className="text-muted-foreground text-xs">
                             {action.description}
@@ -574,14 +587,18 @@ export function PermissionBlockCreateForm({
       {stepIdx === 4 ? (
         <div className="grid gap-3 rounded-lg border bg-background p-4">
           <ReviewRow label="tenant_id">
-            {draft.tenantId ? selectedTenant?.name ?? draft.tenantId : "NULL"}
+            {draft.tenantId ? (selectedTenant?.name ?? draft.tenantId) : "NULL"}
           </ReviewRow>
           <ReviewRow label="scope_mode">{draft.scopeMode}</ReviewRow>
-          <ReviewRow label="object_kind">{draft.objectKind || "NULL"}</ReviewRow>
-          <ReviewRow label="object_type">{draft.objectType || "NULL"}</ReviewRow>
+          <ReviewRow label="object_kind">
+            {draft.objectKind || "NULL"}
+          </ReviewRow>
+          <ReviewRow label="object_type">
+            {draft.objectType || "NULL"}
+          </ReviewRow>
           <ReviewRow label="object_id">{draft.objectId || "NULL"}</ReviewRow>
           <ReviewRow label="group_id">
-            {draft.groupId ? selectedGroup?.name ?? draft.groupId : "NULL"}
+            {draft.groupId ? (selectedGroup?.name ?? draft.groupId) : "NULL"}
           </ReviewRow>
           <ReviewRow label="effect">{draft.effect}</ReviewRow>
           <ReviewRow label="actions">
@@ -688,7 +705,8 @@ function resetScopeFields(draft: Draft, scopeMode: ScopeMode): Draft {
     ...draft,
     scopeMode,
     objectKind:
-      scopeMode === "group_child_groups" || scopeMode === "group_descendant_groups"
+      scopeMode === "group_child_groups" ||
+      scopeMode === "group_descendant_groups"
         ? ""
         : draft.objectKind,
     objectType: "",
@@ -710,9 +728,12 @@ function needsObjectKind(scopeMode: ScopeMode) {
 
 function needsObjectType(scopeMode: ScopeMode, objectKind: string) {
   if (!["entity", "resource"].includes(objectKind)) return false;
-  return ["object_type", "object", "group_direct_objects", "group_descendant_objects"].includes(
-    scopeMode,
-  );
+  return [
+    "object_type",
+    "object",
+    "group_direct_objects",
+    "group_descendant_objects",
+  ].includes(scopeMode);
 }
 
 function needsGroup(scopeMode: ScopeMode) {
@@ -726,7 +747,9 @@ function needsGroup(scopeMode: ScopeMode) {
 }
 
 function objectKindOptions(scopeMode: ScopeMode) {
-  if (["group_direct_objects", "group_descendant_objects"].includes(scopeMode)) {
+  if (
+    ["group_direct_objects", "group_descendant_objects"].includes(scopeMode)
+  ) {
     return OBJECT_KINDS.filter((kind) =>
       ["entity", "resource"].includes(kind.value),
     );
@@ -743,7 +766,10 @@ function objectTypeOptions(objectKind: string) {
 function actionFilterForScope(draft: Draft) {
   switch (draft.scopeMode) {
     case "object_kind":
-      return { objectKind: draft.objectKind || undefined, objectType: undefined };
+      return {
+        objectKind: draft.objectKind || undefined,
+        objectType: undefined,
+      };
     case "object_type":
     case "object":
     case "group_direct_objects":
@@ -772,7 +798,10 @@ function stepError(step: number, draft: Draft) {
     if (needsObjectKind(draft.scopeMode) && !draft.objectKind) {
       return "Object kind is required";
     }
-    if (needsObjectType(draft.scopeMode, draft.objectKind) && !draft.objectType) {
+    if (
+      needsObjectType(draft.scopeMode, draft.objectKind) &&
+      !draft.objectType
+    ) {
       return "Object type is required";
     }
     if (draft.scopeMode === "object" && !draft.objectId) {
@@ -792,9 +821,9 @@ function stepError(step: number, draft: Draft) {
   return null;
 }
 
-function parseConditions(value: string):
-  | { ok: true; value: Record<string, unknown> }
-  | { ok: false; error: string } {
+function parseConditions(
+  value: string,
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
   try {
     const parsed = JSON.parse(value || "{}");
     if (

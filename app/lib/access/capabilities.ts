@@ -107,7 +107,10 @@ export function capabilityTargetFromRoleScope(
       objectType: `${objectKind}:${objectTypeParts.join(":")}`,
     };
   }
-  if (scopeKind === "group_child_kind" || scopeKind === "group_descendant_kind") {
+  if (
+    scopeKind === "group_child_kind" ||
+    scopeKind === "group_descendant_kind"
+  ) {
     return { objectKind: "group" };
   }
 

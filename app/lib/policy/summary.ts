@@ -46,7 +46,9 @@ export function scopeSummary(kind: PolicyDraft["scopeKind"], ref?: string) {
     case "object":
       return ref ? `object ${ref}` : "a specific object";
     case "group_object_type":
-      return ref ? `direct group-contained ${ref}` : "direct group-contained objects";
+      return ref
+        ? `direct group-contained ${ref}`
+        : "direct group-contained objects";
     case "group_tree_object_type":
       return ref ? `subgroup-contained ${ref}` : "objects in subgroups";
     case "group_child_kind":
