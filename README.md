@@ -688,8 +688,29 @@ docker run -p 8090:8080 \
 ```bash
 cd docs
 pnpm install
-pnpm dev     # http://localhost:3000
+pnpm dev     # http://localhost:3000/docs/atom/
 ```
+
+The rendered docs site is a static Next.js export served under `/docs/atom/`.
+It follows the same Cloudflare Workers static-assets deployment pattern as
+FluxMQ docs: `pnpm run build` exports and nests the site under
+`docs/out/docs/atom/`, then `wrangler deploy` publishes `docs/out/`.
+
+```bash
+cd docs
+pnpm run build
+pnpm exec wrangler deploy --dry-run
+pnpm run deploy
+```
+
+Cloudflare build settings:
+
+| Setting         | Value                         |
+|-----------------|-------------------------------|
+| Build command   | `pnpm run build`              |
+| Deploy command  | `npx wrangler deploy`         |
+| Version command | `npx wrangler versions upload` |
+| Root directory  | `/docs`                       |
 
 ---
 

@@ -1,3 +1,2 @@
 / /docs/atom/ 301
-/docs/atom/_next/* /_next/:splat 200
-/docs/atom/* /:splat 200
+/docs/atom /docs/atom/ 301

@@ -10,8 +10,10 @@
   "type": "module",
   "scripts": {
     "dev": "next dev --turbopack",
-    "build": "next build",
-    "start": "next start"
+    "build": "next build && node scripts/nest-static-export.mjs",
+    "start": "serve out",
+    "deploy": "pnpm run build && wrangler deploy",
+    "upload": "pnpm run build && wrangler versions upload"
   },
   "dependencies": {
     "fumadocs-core": "^14",
@@ -30,7 +32,9 @@
     "autoprefixer": "^10",
     "postcss": "^8",
     "tailwindcss": "^3",
-    "typescript": "^5"
+    "typescript": "^5",
+    "serve": "^14.2.5",
+    "wrangler": "^4.95.0"
   },
   "packageManager": "pnpm@10.33.0"
 }
