@@ -30,7 +30,7 @@ fn state(pool: PgPool) -> AppState {
         admin_secret: None,
         service_secret: None,
         service_entity_id: atom::config::SERVICE_ENTITY_ID,
-        signup_enabled: false,
+        self_registration_enabled: false,
         dev_allow_unverified_email_login: false,
         public_base_url: "http://localhost:8080".into(),
         cors_allowed_origins: vec!["http://localhost:8080".into()],

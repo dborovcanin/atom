@@ -175,7 +175,7 @@ GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Be
 
 Certificate support is enabled by default. Atom loads issuer CA material from mounted files and does not store CA certificates or CA private keys in Postgres. Production deployments should use `ATOM_CERTS_CA_MODE=file_intermediate_issuer` with root certificate, intermediate certificate, and intermediate private key files mounted read-only; `file_root_issuer` is supported for local/dev when only root certificate and root private key files exist. Public PKI endpoints are available at `GET /certs/ca-chain`, `GET /certs/crl`, and `POST /certs/ocsp`.
 
-The Atom Next UI is a separate optional service. In Docker Compose it is enabled with the `atom-ui` profile and is available at `http://localhost:3005`.
+The Atom Next UI is a separate optional service. In Docker Compose it is enabled with the `atom-ui` profile and is available at `http://localhost:3005`. Registration UI is exposed at `/register` when `ATOM_UI_REGISTRATION_ENABLED=true` and backend self-registration is enabled.
 
 Shared Magistrala/Cube deployments may consume `ghcr.io/absmach/atom:latest` and `ghcr.io/absmach/atom-ui:latest`, but those tags are mutable. Before consuming `latest`, publish both images from the same stabilized Atom commit. Production deployments that need immutability should override the image with a digest or fixed release tag.
 
@@ -346,7 +346,9 @@ Generic application mapping:
 | `ATOM_MIN_PASSWORD_CHARS` | `12` | Minimum password length |
 | `ATOM_CORS_ALLOWED_ORIGINS` | `ATOM_PUBLIC_BASE_URL` | Comma-separated allowed CORS origins |
 | `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN` | auto-detect HTTPS / *(unset)* | Auth cookie options for UI flows |
-| `ATOM_SIGNUP_ENABLED` | `false` | Enables unauthenticated global human signup |
+| `ATOM_SELF_REGISTRATION_ENABLED` | `true` | Enables unauthenticated global human self-registration |
+| `ATOM_UI_REGISTRATION_ENABLED` | `true` | UI service only; exposes `/register` and the login-page signup link |
+| `ATOM_SIGNUP_ENABLED` | *(legacy alias)* | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED` |
 | `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false` | Development-only password login before email verification |
 | `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080` | Public URL used for issuer and redirect defaults |
 | `ATOM_EMAIL_VERIFICATION_REDIRECT` | `http://localhost:8080/auth/email/verify` | URL that verifies email tokens |
@@ -405,11 +407,13 @@ curl -s -X POST http://localhost:8080/auth/login \
 # → {"token":"eyJ...", "entity_id":"...", "session_id":"...", "expires_at":"..."}
 ```
 
-**Human signup** — disabled by default. When `ATOM_SIGNUP_ENABLED=true`,
-`/auth/signup` creates a global human entity (`tenant_id = NULL`), stores the
-normalized email, creates a password credential keyed by that email, and sends
-a verification email. It returns `202 Accepted` and does not issue a JWT until
-the email is verified. It never creates a tenant or grants platform privileges:
+**Human self-registration** — enabled by default. When
+`ATOM_SELF_REGISTRATION_ENABLED=false`, public signup is disabled and users must
+be onboarded by an administrator. When enabled, `/auth/signup` creates a global
+human entity (`tenant_id = NULL`), stores the normalized email, creates a
+password credential keyed by that email, and sends a verification email. It
+returns `202 Accepted` and does not issue a JWT until the email is verified. It
+never creates a tenant or grants platform privileges:
 
 ```bash
 curl -s -X POST http://localhost:8080/auth/signup \
@@ -428,6 +432,9 @@ curl -s -X POST http://localhost:8080/auth/email/resend \
 For local development only, `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN=true`
 allows password login before verification while still rejecting inactive or
 suspended entities.
+
+The optional Next UI shows `/register` only when both
+`ATOM_UI_REGISTRATION_ENABLED=true` and backend self-registration are enabled.
 
 **OIDC/OAuth signup and login** — configure providers with
 `ATOM_OIDC_PROVIDERS`. The callback requires a provider-verified email, creates

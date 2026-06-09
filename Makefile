@@ -72,7 +72,7 @@ dev-env:
 			echo "ATOM_CERTS_ROOT_CA_CERT_PATH=/certs/root-ca.crt"; \
 			echo "ATOM_CERTS_ROOT_CA_KEY_PATH=/certs/root-ca.key"; \
 			echo "ATOM_CERTS_CA_DIR=./certs"; \
-			echo "ATOM_SIGNUP_ENABLED=false"; \
+			echo "ATOM_SELF_REGISTRATION_ENABLED=false"; \
 			echo "ATOM_HTTP_PORT=18080"; \
 			echo "ATOM_PUBLIC_BASE_URL=http://localhost:18080"; \
 			echo "ATOM_UI_HTTP_PORT=3005"; \

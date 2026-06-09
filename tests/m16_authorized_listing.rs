@@ -4,7 +4,7 @@
 //! by default:
 //!
 //! ```bash
-//! DATABASE_URL=postgres://... cargo test --test m17_authorized_listing -- --ignored
+//! DATABASE_URL=postgres://... cargo test --test m16_authorized_listing -- --ignored
 //! ```
 
 mod common;

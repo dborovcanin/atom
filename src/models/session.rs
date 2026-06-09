@@ -55,7 +55,9 @@ pub struct SignupResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PublicAuthConfigResponse {
+    /// Backward-compatible alias for self_registration_enabled.
     pub signup_enabled: bool,
+    pub self_registration_enabled: bool,
     pub oauth_providers: Vec<String>,
     pub email_verification_required: bool,
     pub dev_allow_unverified_email_login: bool,

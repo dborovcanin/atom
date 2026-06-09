@@ -2,8 +2,8 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { AUTH_COOKIE } from "@/lib/auth/constants";
 
-const REDIRECT_TO_LOGIN = new Set(["/register", "/verify-email", "/callback"]);
-const PUBLIC_PAGES = new Set(["/login"]);
+const REDIRECT_TO_LOGIN = new Set(["/verify-email", "/callback"]);
+const PUBLIC_PAGES = new Set(["/login", "/register"]);
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;

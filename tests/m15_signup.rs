@@ -1,8 +1,8 @@
-//! M16 integration tests — public human signup.
+//! M15 integration tests — public human signup.
 //!
 //! Run with:
 //! ```bash
-//! DATABASE_URL=postgres://... cargo test --test m16_signup -- --ignored
+//! DATABASE_URL=postgres://... cargo test --test m15_signup -- --ignored
 //! ```
 
 mod common;
@@ -29,7 +29,7 @@ fn config(dev_allow_unverified_email_login: bool) -> Config {
         admin_secret: None,
         service_secret: None,
         service_entity_id: atom::config::SERVICE_ENTITY_ID,
-        signup_enabled: true,
+        self_registration_enabled: true,
         dev_allow_unverified_email_login,
         public_base_url: "http://localhost:8080".into(),
         cors_allowed_origins: vec!["http://localhost:8080".into()],

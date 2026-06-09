@@ -98,7 +98,7 @@ pub async fn health(State(state): State<AppState>) -> Result<impl IntoResponse, 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
 pub async fn public_auth_config(State(state): State<AppState>) -> Json<PublicAuthConfigResponse> {
-    let oauth_providers = if state.config.signup_enabled {
+    let oauth_providers = if state.config.self_registration_enabled {
         state
             .config
             .oidc_providers
@@ -110,7 +110,8 @@ pub async fn public_auth_config(State(state): State<AppState>) -> Json<PublicAut
     };
 
     Json(PublicAuthConfigResponse {
-        signup_enabled: state.config.signup_enabled,
+        signup_enabled: state.config.self_registration_enabled,
+        self_registration_enabled: state.config.self_registration_enabled,
         oauth_providers,
         email_verification_required: true,
         dev_allow_unverified_email_login: state.config.dev_allow_unverified_email_login,
@@ -159,7 +160,7 @@ pub async fn signup(
     State(state): State<AppState>,
     Json(req): Json<SignupRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if !state.config.signup_enabled {
+    if !state.config.self_registration_enabled {
         return Err(AppError::Forbidden);
     }
 
@@ -204,7 +205,7 @@ pub async fn oauth_start(
     Path(provider): Path<String>,
     Query(query): Query<OAuthStartQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    if !state.config.signup_enabled {
+    if !state.config.self_registration_enabled {
         return Err(AppError::Forbidden);
     }
     let url = service::oauth_start(&state.pool, &state.config, &provider, query.return_to).await?;

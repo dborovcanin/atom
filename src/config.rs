@@ -23,8 +23,8 @@ pub struct Config {
     /// If set, the service entity's password credential is created on first boot.
     pub service_secret: Option<String>,
     pub service_entity_id: Uuid,
-    /// Enables unauthenticated global human signup.
-    pub signup_enabled: bool,
+    /// Enables unauthenticated global human self-registration.
+    pub self_registration_enabled: bool,
     /// Development-only: allow password login before the signup email is verified.
     pub dev_allow_unverified_email_login: bool,
     pub public_base_url: String,
@@ -105,7 +105,11 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(SERVICE_ENTITY_ID),
-            signup_enabled: env_bool("ATOM_SIGNUP_ENABLED"),
+            self_registration_enabled: env_bool_default_with_legacy(
+                "ATOM_SELF_REGISTRATION_ENABLED",
+                "ATOM_SIGNUP_ENABLED",
+                true,
+            ),
             dev_allow_unverified_email_login: env_bool("ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
             auth_cookie_secure: std::env::var("ATOM_AUTH_COOKIE_SECURE")
@@ -178,24 +182,28 @@ pub enum SmtpTls {
 
 fn env_bool(name: &str) -> bool {
     std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        .map(|value| parse_env_bool(&value))
         .unwrap_or(false)
 }
 
 fn env_bool_default(name: &str, default: bool) -> bool {
     std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        .map(|value| parse_env_bool(&value))
         .unwrap_or(default)
+}
+
+fn env_bool_default_with_legacy(name: &str, legacy_name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| parse_env_bool(&value))
+        .or_else(|_| std::env::var(legacy_name).map(|value| parse_env_bool(&value)))
+        .unwrap_or(default)
+}
+
+fn parse_env_bool(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

@@ -68,7 +68,7 @@ impl AuthMutation {
 
     async fn signup(&self, ctx: &Context<'_>, input: SignupInput) -> Result<SignupResponse> {
         let state = ctx.data::<AppState>()?;
-        if !state.config.signup_enabled {
+        if !state.config.self_registration_enabled {
             return Err(async_graphql::Error::new("sign up is not enabled"));
         }
         let response = service::signup_human(

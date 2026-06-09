@@ -47,7 +47,7 @@ export async function graphqlClient<TData>({
 }
 
 export function getGraphqlEndpoint() {
-  return process.env.ATOM_GRAPHQL_URL ?? "http://localhost:8081/graphql";
+  return process.env.ATOM_GRAPHQL_URL ?? "http://localhost:8080/graphql";
 }
 
 export function getBackendBaseUrl() {

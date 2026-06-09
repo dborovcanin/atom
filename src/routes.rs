@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signup_route_is_disabled_by_default() {
+    async fn signup_route_respects_disabled_self_registration() {
         let app = create_router(test_state());
 
         let response = app
@@ -177,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn public_auth_config_reports_enabled_signup_and_providers() {
         let mut state = test_state();
-        state.config.signup_enabled = true;
+        state.config.self_registration_enabled = true;
         state.config.dev_allow_unverified_email_login = true;
         state.config.oidc_providers = vec![OidcProviderConfig {
             name: "google".into(),
@@ -207,6 +207,7 @@ mod tests {
             body,
             serde_json::json!({
                 "signup_enabled": true,
+                "self_registration_enabled": true,
                 "oauth_providers": ["google"],
                 "email_verification_required": true,
                 "dev_allow_unverified_email_login": true
@@ -229,7 +230,7 @@ mod tests {
             admin_secret: None,
             service_secret: None,
             service_entity_id: crate::config::SERVICE_ENTITY_ID,
-            signup_enabled: false,
+            self_registration_enabled: false,
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
             cors_allowed_origins: vec!["http://localhost:8080".into()],
