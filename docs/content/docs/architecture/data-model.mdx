@@ -83,13 +83,19 @@ Plaintext passwords, API key secrets, and generated leaf private keys are never 
 The authorization model is split deliberately:
 
 - `actions` name the operation;
-- `action_applicability` says where the operation is valid;
+- `action_applicability` says where the operation is valid, but does not grant access;
 - `permission_blocks` define the actual rule;
 - `roles` bundle permission blocks;
 - `role_assignments` give roles to subjects;
 - `direct_policies` give one permission block directly to a subject.
 
 This keeps scope and actions in one place: the permission block.
+
+The canonical protected object kinds are `entity`, `resource`, `group`,
+`tenant`, `role`, `policy`, `credential`, `audit_log`, and `signing_key`.
+Sub-kinds are stored with a kind prefix, such as `entity:device` and
+`resource:channel`, so authorization checks, audit logs, and explain output use
+the same values.
 
 ## Certificate State
 

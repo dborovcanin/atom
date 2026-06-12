@@ -13,7 +13,7 @@ Built for [Magistrala](https://github.com/absmach/magistrala), but generic enoug
 |---|---|
 | **Identity** | CRUD for any principal type — humans, devices, services, workloads, applications. All are first-class _entities_. |
 | **Authentication** | Password login returning a JWT, long-lived API keys, session management with revocation. |
-| **Authorization** | Actions, Permission Blocks, Roles, Role Assignments, Direct Policies, and ABAC guardrails evaluated at runtime. |
+| **Authorization** | Actions, Action Applicability, Permission Blocks, Roles, Role Assignments, Direct Policies, and ABAC guardrails evaluated at runtime. |
 | **Grouping** | Principal Groups define who receives roles; Object Groups define where access applies. |
 | **Ownership** | Parent–child relationships between entities. |
 | **Multi-tenancy** | First-class tenants. Magistrala domains map directly to Atom tenants. |
@@ -129,6 +129,6 @@ Generic application mapping uses Atom operations directly: a domain-like app cal
   <Card title="Architecture" href="/architecture" description="System diagram, modules, storage, and deployment shape." />
   <Card title="Certificates" href="/authentication/certificates" description="CA files, certificate credentials, CRL, OCSP, and runtime lookup." />
   <Card title="Magistrala On Atom" href="/magistrala-on-atom" description="How domains, clients, channels, FluxMQ, and Atom fit together." />
-  <Card title="Access Control" href="/access-control" description="Actions, permission blocks, roles, assignments, direct policies, and evaluation." />
+  <Card title="Access Control" href="/access-control" description="Actions, applicability, permission blocks, roles, assignments, direct policies, and evaluation." />
   <Card title="Quickstart" href="/quickstart" description="Get Atom running and make your first authorization check." />
 </Cards>

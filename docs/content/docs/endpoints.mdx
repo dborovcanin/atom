@@ -17,7 +17,7 @@ Path + method lookup  ──► 404 if not found or not active
 Bearer token auth     ──► 401 if missing / invalid
     │
     ▼
-Capability check      ──► 403 if caller lacks execute / manage
+Endpoint action check ──► 403 if caller lacks execute / manage
     │
     ▼
 Request schema validation ──► 400 if body fails JSON Schema
@@ -102,6 +102,10 @@ Regardless of `authMode`, the HTTP caller must hold one of the following actions
 | `manage` | Tenant scope of the endpoint |
 
 A caller without any of these receives **403 Forbidden**.
+
+This is an Atom action check over permission blocks. `execute` and `manage` are
+global action names; the endpoint ID or tenant scope decides where those actions
+apply for this custom endpoint execution.
 
 ---
 

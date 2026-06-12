@@ -20,13 +20,38 @@ Are there extra conditions?
 |---|---|
 | `tenantId` | Tenant boundary for the rule. |
 | `scopeMode` | How broad the rule is. |
-| `objectKind` | Protected object category, such as `tenant`, `entity`, `resource`, `credential`, or `api_endpoint`. |
+| `objectKind` | Protected object category, such as `tenant`, `entity`, `resource`, `group`, `role`, `policy`, `credential`, `audit_log`, or `signing_key`. |
 | `objectType` | More specific type, such as `resource:channel` or `entity:device`. |
 | `objectId` | Exact object ID when the rule targets one object. |
 | `groupId` | Object group ID when the rule targets objects in a group. |
 | `effect` | `allow` or `deny`. |
 | `conditions` | Optional flat JSON conditions. |
 | `actions` | Operation names covered by the rule. |
+
+Every action in a permission block must be valid for the block's target object
+kind/type through Action Applicability. Applicability only says an action can be
+used with that kind of object; it does not grant access until the action appears
+in a matching permission block.
+
+## Object Kinds And Types
+
+Atom's canonical protected object kinds are:
+
+```text
+entity
+resource
+group
+tenant
+role
+policy
+credential
+audit_log
+signing_key
+```
+
+`objectType` is used for finer sub-kinds and is stored with a kind prefix, such
+as `entity:device` or `resource:channel`. Kinds without sub-kinds use
+`objectType = null`.
 
 ## Common Scope Modes
 

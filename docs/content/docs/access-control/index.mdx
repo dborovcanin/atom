@@ -48,6 +48,34 @@ Permission Block is the only place where scope and actions are defined.
 - Direct policies do not redefine scope.
 - Groups do not grant access by themselves; assignments and permission blocks do.
 
+## Actions And Applicability
+
+Actions are global operation names. Atom uses names such as `read`, `write`,
+`delete`, `publish`, `subscribe`, `execute`, `manage`, `create`, `revoke`,
+`rotate`, `policy.manage`, `role.manage`, and `authz.check`.
+
+Do not model object-specific action names such as `client_read`,
+`channel_publish`, or `report_execute`. The action stays global; Action
+Applicability decides where that action is valid.
+
+Action Applicability validates action/object pairs. It does not grant access by
+itself.
+
+Examples:
+
+| Action | Valid object kind/type |
+|---|---|
+| `publish`, `subscribe` | `resource` with type `resource:channel` |
+| `execute` | `resource` with rule or report types |
+| `read`, `write`, `delete` | common protected objects |
+| `manage`, `revoke` | `credential` |
+| `create`, `manage` | `tenant` |
+| `rotate` | `signing_key` |
+| `role.manage`, `policy.manage` | role and policy administration scopes |
+
+Invalid pairs, such as `publish` on an entity or `execute` on a channel, are
+rejected before permission blocks are evaluated.
+
 ## Where To Go Next
 
 <Cards>

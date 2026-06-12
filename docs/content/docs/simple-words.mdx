@@ -39,6 +39,7 @@ Can this certificate still identify this client?
 | Resource | Something protected by access rules | Channel `telemetry`, rule `temperature-alert` |
 | Credential | A way an entity proves who it is | Password, API key, certificate |
 | Action | One operation someone wants to do | `read`, `publish`, `subscribe`, `manage` |
+| Action Applicability | Whether an action makes sense for a kind of object | `publish` is valid for channels |
 | Permission Block | The actual access rule: where, what actions, allow or deny | Channels in Plant-A can be published to |
 | Role | A friendly name for a set of permission blocks | `Plant-A Publisher` |
 | Role Assignment | Gives a role to an entity or group | Give `Plant-A Publisher` to `meter-001` |
@@ -81,6 +82,10 @@ Can meter-001 publish to telemetry?
 ```
 
 Atom checks roles, direct policies, principal groups, object groups, deny rules, and optional conditions. Tokens do not carry permissions. The decision is checked live, so changes take effect immediately.
+
+Action Applicability is only a validity check. It can say "`publish` is a valid
+action for channels," but it does not give anyone permission. A role assignment
+or direct policy must still point to a permission block that grants the action.
 
 ## Certificates In One Sentence
 
