@@ -134,6 +134,7 @@ impl ResourceMutation {
                 id: parse_optional_id(input.id, "id")?,
                 kind: input.kind,
                 name: input.name,
+                alias: input.alias,
                 tenant_id,
                 owner_id: parse_optional_id(input.owner_id, "ownerId")?,
                 attributes: input.attributes.unwrap_or(serde_json::Value::Null),
@@ -172,6 +173,7 @@ impl ResourceMutation {
             id,
             UpdateResource {
                 name: input.name,
+                alias: input.alias,
                 attributes: input.attributes,
             },
         )

@@ -86,7 +86,7 @@ pub async fn login_password_with_tenant(
     identifier: &str,
     secret: &str,
     tenant_id: Option<Uuid>,
-    tenant_route: Option<&str>,
+    tenant_alias: Option<&str>,
 ) -> Result<LoginResponse, AppError> {
     let result = do_login_password(
         pool,
@@ -95,7 +95,7 @@ pub async fn login_password_with_tenant(
         identifier,
         secret,
         tenant_id,
-        tenant_route,
+        tenant_alias,
     )
     .await;
 
@@ -133,9 +133,9 @@ async fn do_login_password(
     identifier: &str,
     secret: &str,
     requested_tenant_id: Option<Uuid>,
-    tenant_route: Option<&str>,
+    tenant_alias: Option<&str>,
 ) -> Result<LoginResponse, AppError> {
-    let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_route).await?;
+    let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_alias).await?;
     let attempt_identifier = login_attempt_identifier(identifier);
     if let Err(err) = ensure_login_not_throttled(
         pool,
@@ -947,7 +947,7 @@ async fn login_entity_row(
     }
     if tenant_id.is_none() && rows.len() > 1 {
         return Err(AppError::unauthorized(
-            "tenant_id or tenant_route required for this identifier",
+            "tenant_id or tenant_alias required for this identifier",
         ));
     }
     Ok(rows.remove(0))
@@ -956,29 +956,29 @@ async fn login_entity_row(
 async fn resolve_login_tenant(
     pool: &PgPool,
     tenant_id: Option<Uuid>,
-    tenant_route: Option<&str>,
+    tenant_alias: Option<&str>,
 ) -> Result<Option<Uuid>, AppError> {
-    let tenant_route = normalize_route(tenant_route);
-    validate_tenant_selector(tenant_id, tenant_route)?;
+    let tenant_alias = normalize_alias(tenant_alias);
+    validate_tenant_selector(tenant_id, tenant_alias.as_deref())?;
 
     use sqlx::Row;
-    let Some(row) = (match (tenant_id, tenant_route) {
+    let Some(row) = (match (tenant_id, tenant_alias) {
         (Some(tenant_id), None) => {
             sqlx::query("SELECT id, status FROM tenants WHERE id = $1")
                 .bind(tenant_id)
                 .fetch_optional(pool)
                 .await
         }
-        (None, Some(tenant_route)) => {
-            sqlx::query("SELECT id, status FROM tenants WHERE route = $1")
-                .bind(tenant_route)
+        (None, Some(tenant_alias)) => {
+            sqlx::query("SELECT id, status FROM tenants WHERE lower(alias) = $1")
+                .bind(tenant_alias)
                 .fetch_optional(pool)
                 .await
         }
         (None, None) => return Ok(None),
         (Some(_), Some(_)) => {
             return Err(AppError::bad_request(
-                "provide either tenant_id or tenant_route, not both",
+                "provide either tenant_id or tenant_alias, not both",
             ))
         }
     })
@@ -1477,17 +1477,24 @@ fn normalize_json_object(value: Value) -> Value {
     }
 }
 
-fn normalize_route(route: Option<&str>) -> Option<&str> {
-    route.map(str::trim).filter(|route| !route.is_empty())
+/// Normalize a alias for *lookup* (login/selector): trim, drop empty, and
+/// case-fold so it matches the `lower(alias)` unique index. Lookup does not
+/// reject malformed slugs (a non-matching alias simply finds no tenant); strict
+/// slug validation happens on the write path via `models::alias::validate_alias`.
+fn normalize_alias(alias: Option<&str>) -> Option<String> {
+    alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 fn validate_tenant_selector(
     tenant_id: Option<Uuid>,
-    tenant_route: Option<&str>,
+    tenant_alias: Option<&str>,
 ) -> Result<(), AppError> {
-    if tenant_id.is_some() && tenant_route.is_some() {
+    if tenant_id.is_some() && tenant_alias.is_some() {
         return Err(AppError::bad_request(
-            "provide either tenant_id or tenant_route, not both",
+            "provide either tenant_id or tenant_alias, not both",
         ));
     }
     Ok(())

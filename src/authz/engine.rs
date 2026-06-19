@@ -1603,7 +1603,7 @@ mod db_tests {
             CreateTenant {
                 id: None,
                 name: format!("authz-{}", Uuid::new_v4()),
-                route: None,
+                alias: None,
                 tags: vec![],
                 attributes: serde_json::Value::Null,
             },
@@ -1648,7 +1648,7 @@ mod db_tests {
             CreateTenant {
                 id: None,
                 name: format!("authz-deny-{}", Uuid::new_v4()),
-                route: None,
+                alias: None,
                 tags: vec![],
                 attributes: serde_json::Value::Null,
             },
@@ -1753,7 +1753,7 @@ mod db_tests {
             CreateTenant {
                 id: None,
                 name: format!("authz-deleted-{}", Uuid::new_v4()),
-                route: None,
+                alias: None,
                 tags: vec![],
                 attributes: serde_json::Value::Null,
             },

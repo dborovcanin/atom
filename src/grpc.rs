@@ -11,9 +11,9 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
-    authz::{access, engine},
+    authz::{access, engine, repo},
     certs,
-    models::{enums::AuditOutcome, policy::AuthzRequest},
+    models::{alias::AliasObjectClass, enums::AuditOutcome, policy::AuthzRequest},
     state::{AppState, GrpcRuntimeStatus},
 };
 
@@ -23,12 +23,13 @@ pub mod proto {
 }
 
 use proto::{
+    alias_service_server::{AliasService, AliasServiceServer},
     auth_service_server::{AuthService, AuthServiceServer},
     authz_service_server::{AuthzService, AuthzServiceServer},
     certificate_service_server::{CertificateService, CertificateServiceServer},
-    AuthenticateRequest, AuthenticateResponse, CheckRequest, CheckResponse,
-    ResolveCertificateRequest, ResolveCertificateResponse, RevokeEntityCertificatesRequest,
-    RevokeEntityCertificatesResponse,
+    AuthenticateRequest, AuthenticateResponse, CheckRequest, CheckResponse, ResolveAliasRequest,
+    ResolveAliasResponse, ResolveCertificateRequest, ResolveCertificateResponse,
+    RevokeEntityCertificatesRequest, RevokeEntityCertificatesResponse,
 };
 
 // ─── AuthzService ─────────────────────────────────────────────────────────────
@@ -259,6 +260,56 @@ impl CertificateService for AtomCertificates {
     }
 }
 
+// ─── AliasService ──────────────────────────────────────────────────────────────
+
+struct AtomAlias {
+    state: AppState,
+}
+
+#[tonic::async_trait]
+impl AliasService for AtomAlias {
+    async fn resolve_alias(
+        &self,
+        request: Request<ResolveAliasRequest>,
+    ) -> Result<Response<ResolveAliasResponse>, Status> {
+        // Authenticate the caller; resolution itself is capability-neutral — the
+        // subsequent AuthzService.Check by UUID is the authorization gate.
+        let _auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
+        let req = request.into_inner();
+
+        let tenant_id = if req.tenant_id.is_empty() {
+            None
+        } else {
+            Some(
+                Uuid::parse_str(&req.tenant_id)
+                    .map_err(|_| Status::invalid_argument("invalid tenant_id: expected UUID"))?,
+            )
+        };
+        let tenant_alias = (!req.tenant_alias.is_empty()).then_some(req.tenant_alias.as_str());
+
+        let class = if req.object_kind.eq_ignore_ascii_case("entity") {
+            AliasObjectClass::Entity
+        } else {
+            AliasObjectClass::Resource
+        };
+
+        let resolved = repo::resolve_alias(
+            &self.state.pool,
+            tenant_id,
+            tenant_alias,
+            class,
+            &req.object_alias,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Response::new(ResolveAliasResponse {
+            tenant_id: resolved.tenant_id.to_string(),
+            object_id: resolved.object_id.to_string(),
+        }))
+    }
+}
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 pub async fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
@@ -289,6 +340,9 @@ pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()>
     health_reporter
         .set_serving::<CertificateServiceServer<AtomCertificates>>()
         .await;
+    health_reporter
+        .set_serving::<AliasServiceServer<AtomAlias>>()
+        .await;
 
     state
         .set_grpc_status(GrpcRuntimeStatus::serving(addr.to_string()))
@@ -303,6 +357,9 @@ pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()>
             state: state.clone(),
         }))
         .add_service(CertificateServiceServer::new(AtomCertificates {
+            state: state.clone(),
+        }))
+        .add_service(AliasServiceServer::new(AtomAlias {
             state: state.clone(),
         }))
         .serve_with_incoming(incoming)

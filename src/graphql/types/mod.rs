@@ -218,6 +218,10 @@ impl Entity {
         &self.0.name
     }
 
+    async fn alias(&self) -> Option<&str> {
+        self.0.alias.as_deref()
+    }
+
     async fn tenant_id(&self) -> Option<ID> {
         self.0.tenant_id.map(id)
     }
@@ -330,8 +334,8 @@ impl Tenant {
         &self.0.name
     }
 
-    async fn route(&self) -> Option<&str> {
-        self.0.route.as_deref()
+    async fn alias(&self) -> Option<&str> {
+        self.0.alias.as_deref()
     }
 
     async fn status(&self) -> GqlTenantStatus {
@@ -430,6 +434,10 @@ impl Resource {
 
     async fn name(&self) -> Option<&str> {
         self.0.name.as_deref()
+    }
+
+    async fn alias(&self) -> Option<&str> {
+        self.0.alias.as_deref()
     }
 
     async fn tenant_id(&self) -> Option<ID> {
@@ -1393,7 +1401,7 @@ pub struct LoginInput {
     pub identifier: String,
     pub secret: String,
     pub tenant_id: Option<ID>,
-    pub tenant_route: Option<String>,
+    pub tenant_alias: Option<String>,
     #[graphql(default = "password")]
     pub kind: String,
 }
@@ -1440,6 +1448,7 @@ pub struct CreateEntityInput {
     pub profile_version_id: Option<ID>,
     pub kind: Option<GqlEntityKind>,
     pub name: String,
+    pub alias: Option<String>,
     pub tenant_id: Option<ID>,
     pub attributes: Value,
 }
@@ -1448,6 +1457,7 @@ pub struct CreateEntityInput {
 pub struct UpdateEntityInput {
     pub name: Option<String>,
     pub kind: Option<GqlEntityKind>,
+    pub alias: Option<String>,
     pub tenant_id: Option<ID>,
     pub profile_id: Option<ID>,
     pub profile_version_id: Option<ID>,
@@ -1459,7 +1469,7 @@ pub struct UpdateEntityInput {
 pub struct CreateTenantInput {
     pub id: Option<ID>,
     pub name: String,
-    pub route: Option<String>,
+    pub alias: Option<String>,
     pub tags: Option<Vec<String>>,
     pub attributes: Option<Value>,
 }
@@ -1467,7 +1477,7 @@ pub struct CreateTenantInput {
 #[derive(InputObject)]
 pub struct UpdateTenantInput {
     pub name: Option<String>,
-    pub route: Option<String>,
+    pub alias: Option<String>,
     pub tags: Option<Vec<String>>,
     pub attributes: Option<Value>,
 }
@@ -1491,6 +1501,7 @@ pub struct CreateResourceInput {
     pub id: Option<ID>,
     pub kind: String,
     pub name: Option<String>,
+    pub alias: Option<String>,
     pub tenant_id: Option<ID>,
     pub owner_id: Option<ID>,
     pub attributes: Option<Value>,
@@ -1499,6 +1510,7 @@ pub struct CreateResourceInput {
 #[derive(InputObject)]
 pub struct UpdateResourceInput {
     pub name: Option<String>,
+    pub alias: Option<String>,
     pub attributes: Option<Value>,
 }
 

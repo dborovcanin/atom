@@ -22,6 +22,16 @@ Magistrala still handles IoT application behavior: protocols, message routing, s
 | Role member set | Principal group or role assignment |
 | Client-channel connection | Role assignment or direct policy |
 
+## Routes And Aliases
+
+Magistrala addresses messages by route — a friendly path such as `m/ultraviolet/c/watermeters/#` — instead of raw UUIDs. Atom backs this with **aliases**: the domain segment is the tenant alias and the channel segment is the resource alias.
+
+- Magistrala owns the topic grammar (`m/`, `/c/`, `#`, parsing, routing); Atom only stores and resolves the alias slugs.
+- A broker resolves a route once via `AliasService.ResolveAlias` — passing the tenant alias and the channel alias — gets back the tenant and resource UUIDs, caches them, then authorizes each message by UUID with `AuthzService.Check`.
+- Aliases are unique per tenant, so two domains can both expose a `watermeters` channel.
+
+See [Aliases](/architecture/data-model#aliases) for slug rules and uniqueness.
+
 ## Runtime Flow
 
 <Mermaid chart={`flowchart LR

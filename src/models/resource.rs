@@ -8,6 +8,7 @@ pub struct Resource {
     pub id: Uuid,
     pub kind: String,
     pub name: Option<String>,
+    pub alias: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub owner_id: Option<Uuid>,
     pub attributes: Value,
@@ -20,6 +21,7 @@ pub struct CreateResource {
     pub id: Option<Uuid>,
     pub kind: String,
     pub name: Option<String>,
+    pub alias: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub owner_id: Option<Uuid>,
     #[serde(default)]
@@ -29,6 +31,7 @@ pub struct CreateResource {
 #[derive(Debug, Deserialize)]
 pub struct UpdateResource {
     pub name: Option<String>,
+    pub alias: Option<String>,
     pub attributes: Option<Value>,
 }
 

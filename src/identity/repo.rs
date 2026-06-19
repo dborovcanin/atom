@@ -31,18 +31,20 @@ pub async fn create_entity(pool: &PgPool, req: CreateEntity) -> Result<Entity, A
     )
     .await?;
     let is_human = kind == EntityKind::Human;
+    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let entity = sqlx::query_as::<_, Entity>(
         r#"INSERT INTO entities
-           (id, kind, name, tenant_id, profile_id, profile_version_id, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, kind, name, tenant_id, profile_id, profile_version_id,
+           (id, kind, name, alias, tenant_id, profile_id, profile_version_id, attributes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                      status, attributes, created_at, updated_at"#,
     )
     .bind(id)
     .bind(kind)
     .bind(req.name)
+    .bind(alias)
     .bind(req.tenant_id)
     .bind(profile_id)
     .bind(profile_version_id)
@@ -81,7 +83,7 @@ pub async fn add_authenticated_user_membership_in_tx(
 
 pub async fn get_entity(pool: &PgPool, id: Uuid) -> Result<Entity, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                   status, attributes, created_at, updated_at
            FROM entities
            WHERE id = $1"#,
@@ -101,7 +103,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
     }
 
     sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                   status, attributes, created_at, updated_at
            FROM entities
            WHERE id = ANY($1::uuid[])
@@ -133,7 +135,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                JOIN target_groups tg ON tg.id = gh.parent_id
                WHERE $7::boolean
            )
-           SELECT e.id, e.kind, e.name, e.tenant_id, e.profile_id, e.profile_version_id,
+           SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
@@ -141,7 +143,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
-             AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
+             AND ($5::text IS NULL OR e.name ILIKE $5 OR e.alias ILIKE $5 OR e.attributes::text ILIKE $5)
              AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
            ORDER BY e.created_at DESC
            LIMIT $8 OFFSET $9"#,
@@ -175,7 +177,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
-             AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
+             AND ($5::text IS NULL OR e.name ILIKE $5 OR e.alias ILIKE $5 OR e.attributes::text ILIKE $5)
              AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))"#,
     )
     .bind(kind)
@@ -203,6 +205,8 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
         validate_existing_entity_attributes(pool, id, attrs).await?;
     }
 
+    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+
     let mut tx = pool.begin().await.map_err(db_err)?;
     let entity = sqlx::query_as::<_, Entity>(
         r#"UPDATE entities
@@ -213,9 +217,10 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
                profile_version_id = COALESCE($6, profile_version_id),
                status             = COALESCE($7, status),
                attributes         = COALESCE($8, attributes),
+               alias              = COALESCE($9, alias),
                updated_at         = now()
            WHERE id = $1
-           RETURNING id, kind, name, tenant_id, profile_id, profile_version_id,
+           RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                      status, attributes, created_at, updated_at"#,
     )
     .bind(id)
@@ -226,6 +231,7 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
     .bind(req.profile_version_id)
     .bind(req.status)
     .bind(attributes)
+    .bind(alias)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -925,7 +931,7 @@ pub async fn remove_group_member(
 
 pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Entity>, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.profile_id, e.profile_version_id,
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            JOIN principal_group_members gm ON gm.entity_id = e.id
@@ -970,7 +976,7 @@ pub async fn create_ownership(
 
 pub async fn list_owned(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Entity>, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.profile_id, e.profile_version_id,
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            JOIN ownerships o ON o.owned_id = e.id

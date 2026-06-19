@@ -31,7 +31,7 @@ pub struct LoginRequest {
     pub identifier: String,
     pub secret: String,
     pub tenant_id: Option<Uuid>,
-    pub tenant_route: Option<String>,
+    pub tenant_alias: Option<String>,
     #[serde(default = "default_kind")]
     pub kind: CredentialKind,
 }

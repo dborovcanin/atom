@@ -105,7 +105,7 @@ export function tenantFormInitialValues(row: Row): TenantFormInitialValues {
   return {
     id: String(row.id),
     name: typeof row.name === "string" ? row.name : "",
-    route: typeof row.route === "string" ? row.route : "",
+    alias: typeof row.alias === "string" ? row.alias : "",
     tags: Array.isArray(row.tags) ? row.tags.map((tag) => String(tag)) : [],
     attributes:
       row.attributes && typeof row.attributes === "object"

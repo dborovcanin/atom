@@ -10,6 +10,7 @@ pub struct Entity {
     pub id: Uuid,
     pub kind: EntityKind,
     pub name: String,
+    pub alias: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,
@@ -26,6 +27,7 @@ pub struct CreateEntity {
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,
     pub name: String,
+    pub alias: Option<String>,
     pub tenant_id: Option<Uuid>,
     #[serde(default)]
     pub attributes: Value,
@@ -35,6 +37,7 @@ pub struct CreateEntity {
 pub struct UpdateEntity {
     pub name: Option<String>,
     pub kind: Option<EntityKind>,
+    pub alias: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,

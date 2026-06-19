@@ -155,6 +155,7 @@ impl EntityMutation {
                     "profileVersionId",
                 )?,
                 name: input.name,
+                alias: input.alias,
                 tenant_id,
                 attributes: input.attributes,
             },
@@ -194,6 +195,7 @@ impl EntityMutation {
             entity_model::UpdateEntity {
                 name: input.name,
                 kind: parse_optional_entity_kind(input.kind),
+                alias: input.alias,
                 tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
                 profile_id: parse_optional_id(input.profile_id, "profileId")?,
                 profile_version_id: parse_optional_id(
@@ -385,6 +387,7 @@ async fn change_entity_status(
         entity_model::UpdateEntity {
             name: None,
             kind: None,
+            alias: None,
             tenant_id: None,
             profile_id: None,
             profile_version_id: None,

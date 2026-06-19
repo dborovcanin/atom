@@ -68,6 +68,7 @@ fn entity_request(name: String) -> CreateEntity {
         profile_id: None,
         profile_version_id: None,
         name,
+        alias: None,
         tenant_id: None,
         attributes: json!({}),
     }

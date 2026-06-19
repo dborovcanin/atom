@@ -32,13 +32,13 @@ const GLOBAL_OPTION: TenantSelection = { id: GLOBAL_TENANT, name: "Global" };
 const TENANTS_QUERY = `
   query TenantSwitcher {
     tenants(limit: 100, offset: 0) {
-      items { id name route }
+      items { id name alias }
     }
   }
 `;
 
 type TenantsData = {
-  tenants: { items: { id: string; name: string; route: string | null }[] };
+  tenants: { items: { id: string; name: string; alias: string | null }[] };
 };
 
 export function TenantSwitcher() {

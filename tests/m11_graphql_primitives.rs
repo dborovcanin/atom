@@ -112,7 +112,7 @@ async fn profile_with_schema(pool: &PgPool, json_schema: Value) -> Uuid {
 }
 
 async fn delete_tenant_row(pool: &PgPool, tenant_id: Uuid) {
-    let _ = sqlx::query_as::<_, Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, route, status, tags, attributes, created_by, updated_by, created_at, updated_at")
+    let _ = sqlx::query_as::<_, Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, created_at, updated_at")
         .bind(tenant_id)
         .fetch_optional(pool)
         .await;
@@ -232,7 +232,7 @@ async fn create_list_and_get_tenant() {
     let pool = common::pool().await;
     let schema = build_schema(state(pool.clone()).await);
     let name = format!("graphql-tenant-{}", Uuid::new_v4());
-    let route = format!("graphql-route-{}", Uuid::new_v4());
+    let alias = format!("graphql-alias-{}", Uuid::new_v4());
 
     let created = schema
         .execute(authed(format!(
@@ -240,13 +240,13 @@ async fn create_list_and_get_tenant() {
             mutation {{
               createTenant(input: {{
                 name: "{name}",
-                route: "{route}",
+                alias: "{alias}",
                 tags: ["graphql"],
                 attributes: {{ source: "graphql" }}
               }}) {{
                 id
                 name
-                route
+                alias
                 status
                 tags
                 attributes
@@ -266,7 +266,7 @@ async fn create_list_and_get_tenant() {
             r#"
             {{
               tenants(name: "{name}") {{
-                items {{ id name route }}
+                items {{ id name alias }}
                 total
               }}
             }}
@@ -288,7 +288,7 @@ async fn create_list_and_get_tenant() {
               tenant(id: "{tenant_id}") {{
                 id
                 name
-                route
+                alias
               }}
             }}
             "#

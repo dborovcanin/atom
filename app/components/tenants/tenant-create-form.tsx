@@ -27,7 +27,7 @@ const CREATE_TENANT_MUTATION = `
     createTenant(input: $input) {
       id
       name
-      route
+      alias
       status
       tags
       attributes
@@ -42,7 +42,7 @@ const UPDATE_TENANT_MUTATION = `
     updateTenant(id: $id, input: $input) {
       id
       name
-      route
+      alias
       status
       tags
       attributes
@@ -55,7 +55,7 @@ const UPDATE_TENANT_MUTATION = `
 const tenantFormSchema = z
   .object({
     name: z.string().trim().min(1, "Name is required."),
-    route: z.string().trim(),
+    alias: z.string().trim(),
     tags: z.array(z.string().trim().min(1)).superRefine((tags, ctx) => {
       if (new Set(tags).size !== tags.length) {
         ctx.addIssue({
@@ -85,14 +85,14 @@ type TenantFormValues = z.infer<typeof tenantFormSchema>;
 export type TenantFormInitialValues = {
   id: string;
   name?: string | null;
-  route?: string | null;
+  alias?: string | null;
   tags?: string[] | null;
   attributes?: unknown;
 };
 
 const defaultValues: TenantFormValues = {
   name: "",
-  route: "",
+  alias: "",
   tags: [],
   attributes: "{}",
 };
@@ -133,7 +133,7 @@ export function TenantCreateForm({
         variables: {
           input: removeEmptyValues({
             name: values.name,
-            route: values.route,
+            alias: values.alias,
             tags: values.tags,
             attributes: parseAttributesJson(values.attributes),
           }),
@@ -157,7 +157,7 @@ export function TenantCreateForm({
           id: tenant.id,
           input: {
             name: values.name,
-            route: values.route || null,
+            alias: values.alias || null,
             tags: values.tags,
             attributes: parseAttributesJson(values.attributes),
           },
@@ -184,7 +184,7 @@ export function TenantCreateForm({
     <Form {...form}>
       <form className="grid gap-4" onSubmit={form.handleSubmit(submit)}>
         <TextField form={form} label="Name" name="name" required />
-        <TextField form={form} label="Route" name="route" />
+        <TextField form={form} label="Alias" name="alias" />
         <TagsField
           form={form}
           setTagItems={setTenantTags}
@@ -217,7 +217,7 @@ function tenantFormValuesFromTenant(
   if (!tenant) return defaultValues;
   return {
     name: tenant.name ?? "",
-    route: tenant.route ?? "",
+    alias: tenant.alias ?? "",
     tags: tenant.tags ?? [],
     attributes: stringifyAttributes(tenant.attributes),
   };
@@ -240,7 +240,7 @@ function TextField({
 }: {
   form: UseFormReturn<TenantFormValues>;
   label: string;
-  name: "name" | "route";
+  name: "name" | "alias";
   required?: boolean;
 }) {
   return (

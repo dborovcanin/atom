@@ -17,7 +17,7 @@ use crate::{
 };
 
 const TENANT_COLS: &str =
-    "id, name, route, status, tags, attributes, created_by, updated_by, created_at, updated_at";
+    "id, name, alias, status, tags, attributes, created_by, updated_by, created_at, updated_at";
 const INVITATION_COLS: &str =
     "ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email, ti.invited_by,
      ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
@@ -86,19 +86,20 @@ async fn create_tenant_in_tx(
     created_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
     let id = req.id.unwrap_or_else(Uuid::new_v4);
+    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
     let attrs = if req.attributes.is_null() {
         serde_json::json!({})
     } else {
         req.attributes
     };
     sqlx::query_as::<_, Tenant>(&format!(
-        r#"INSERT INTO tenants (id, name, route, tags, attributes, created_by, updated_by)
+        r#"INSERT INTO tenants (id, name, alias, tags, attributes, created_by, updated_by)
            VALUES ($1, $2, $3, $4, $5, $6, $6)
            RETURNING {TENANT_COLS}"#,
     ))
     .bind(id)
     .bind(req.name)
-    .bind(req.route)
+    .bind(alias)
     .bind(&req.tags)
     .bind(attrs)
     .bind(created_by)
@@ -233,21 +234,21 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let name = params.name;
-    let route = params.route;
+    let alias = params.alias;
     let status = params.status;
     let q = search_pattern(params.q);
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
            WHERE ($1::text IS NULL OR name = $1)
-             AND ($2::text IS NULL OR route = $2)
+             AND ($2::text IS NULL OR lower(alias) = lower($2))
              AND ($3::text IS NULL OR status = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR route ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
+             AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
            ORDER BY created_at DESC
            LIMIT $5 OFFSET $6"#,
     ))
     .bind(name.clone())
-    .bind(route.clone())
+    .bind(alias.clone())
     .bind(status.clone())
     .bind(q.clone())
     .bind(limit)
@@ -259,12 +260,12 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenants
            WHERE ($1::text IS NULL OR name = $1)
-             AND ($2::text IS NULL OR route = $2)
+             AND ($2::text IS NULL OR lower(alias) = lower($2))
              AND ($3::text IS NULL OR status = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR route ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)"#,
+             AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)"#,
     )
     .bind(name)
-    .bind(route)
+    .bind(alias)
     .bind(status)
     .bind(q)
     .fetch_one(pool)
@@ -282,7 +283,7 @@ pub async fn list_tenants_for_entity(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let name = params.name;
-    let route = params.route;
+    let alias = params.alias;
     let status = params.status;
     let q = search_pattern(params.q);
     let access_actions = ["read", "manage"];
@@ -290,9 +291,9 @@ pub async fn list_tenants_for_entity(
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants t
            WHERE ($2::text IS NULL OR t.name = $2)
-             AND ($3::text IS NULL OR t.route = $3)
+             AND ($3::text IS NULL OR lower(t.alias) = lower($3))
              AND ($4::text IS NULL OR t.status = $4)
-             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.route ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
+             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
              AND EXISTS (
                  SELECT 1
                  FROM effective_access_edges() pb
@@ -352,7 +353,7 @@ pub async fn list_tenants_for_entity(
     ))
     .bind(entity_id)
     .bind(name.clone())
-    .bind(route.clone())
+    .bind(alias.clone())
     .bind(status.clone())
     .bind(q.clone())
     .bind(access_actions.as_slice())
@@ -365,9 +366,9 @@ pub async fn list_tenants_for_entity(
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenants t
            WHERE ($2::text IS NULL OR t.name = $2)
-             AND ($3::text IS NULL OR t.route = $3)
+             AND ($3::text IS NULL OR lower(t.alias) = lower($3))
              AND ($4::text IS NULL OR t.status = $4)
-             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.route ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
+             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
              AND EXISTS (
                  SELECT 1
                  FROM effective_access_edges() pb
@@ -425,7 +426,7 @@ pub async fn list_tenants_for_entity(
     )
     .bind(entity_id)
     .bind(name)
-    .bind(route)
+    .bind(alias)
     .bind(status)
     .bind(q)
     .bind(access_actions.as_slice())
@@ -442,10 +443,11 @@ pub async fn update_tenant(
     req: UpdateTenant,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
+    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
     sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET name       = COALESCE($2, name),
-               route      = COALESCE($3, route),
+               alias      = COALESCE($3, alias),
                tags       = COALESCE($4, tags),
                attributes = COALESCE($5, attributes),
                updated_by = $6,
@@ -455,7 +457,7 @@ pub async fn update_tenant(
     ))
     .bind(id)
     .bind(req.name)
-    .bind(req.route)
+    .bind(alias)
     .bind(req.tags)
     .bind(req.attributes)
     .bind(updated_by)
@@ -673,7 +675,7 @@ pub async fn list_tenant_members(
     let q = search_pattern(q);
 
     let items = sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.profile_id, e.profile_version_id,
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM tenant_memberships tm
            JOIN entities e ON e.id = tm.entity_id
@@ -722,7 +724,7 @@ pub async fn list_tenant_assignable_entities(
     let q = search_pattern(Some(q));
 
     let items = sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.profile_id, e.profile_version_id,
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            WHERE e.kind = 'human'
@@ -1227,7 +1229,7 @@ mod tests {
         let req = CreateTenant {
             id: None,
             name: unique_name("acme"),
-            route: Some(unique_name("acme-route")),
+            alias: Some(unique_name("acme-alias")),
             tags: vec!["pilot".into()],
             attributes: json!({"region": "eu"}),
         };
@@ -1248,7 +1250,7 @@ mod tests {
             CreateTenant {
                 id: None,
                 name: unique_name("list-a"),
-                route: None,
+                alias: None,
                 tags: vec![],
                 attributes: Value::Null,
             },
@@ -1261,7 +1263,7 @@ mod tests {
             CreateTenant {
                 id: None,
                 name: unique_name("list-b"),
-                route: None,
+                alias: None,
                 tags: vec![],
                 attributes: Value::Null,
             },
@@ -1278,7 +1280,7 @@ mod tests {
             ListTenants {
                 q: None,
                 name: None,
-                route: None,
+                alias: None,
                 status: Some(TenantStatus::Active),
                 limit: 100,
                 offset: 0,
@@ -1300,7 +1302,7 @@ mod tests {
             CreateTenant {
                 id: None,
                 name: unique_name("upd"),
-                route: Some("orig-route".into()),
+                alias: Some("orig-alias".into()),
                 tags: vec!["x".into()],
                 attributes: json!({"k": "v"}),
             },
@@ -1313,7 +1315,7 @@ mod tests {
             t.id,
             UpdateTenant {
                 name: Some("renamed".into()),
-                route: None,
+                alias: None,
                 tags: None,
                 attributes: None,
             },
@@ -1322,7 +1324,7 @@ mod tests {
         .await
         .expect("update");
         assert_eq!(upd.name, "renamed");
-        assert_eq!(upd.route.as_deref(), Some("orig-route"));
+        assert_eq!(upd.alias.as_deref(), Some("orig-alias"));
         assert_eq!(upd.tags, vec!["x".to_string()]);
         cleanup(&pool, &[t.id]).await;
     }
@@ -1336,7 +1338,7 @@ mod tests {
             CreateTenant {
                 id: None,
                 name: unique_name("status"),
-                route: None,
+                alias: None,
                 tags: vec![],
                 attributes: Value::Null,
             },

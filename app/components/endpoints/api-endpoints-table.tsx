@@ -176,14 +176,14 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "create_tenant",
       name: "Create Tenant",
-      description: "Creates a new tenant with a name and optional route.",
+      description: "Creates a new tenant with a name and optional alias.",
       method: "POST",
       path: "/api/custom/tenants",
       operationKind: "mutation",
-      graphql: `mutation CreateTenant($input: CreateTenantInput!) {\n  createTenant(input: $input) {\n    id\n    name\n    route\n    status\n    createdAt\n  }\n}`,
+      graphql: `mutation CreateTenant($input: CreateTenantInput!) {\n  createTenant(input: $input) {\n    id\n    name\n    alias\n    status\n    createdAt\n  }\n}`,
       authMode: "caller_context",
       variablesMapping: JSON.stringify(
-        { "input.name": "$body.name", "input.route": "$body.route" },
+        { "input.name": "$body.name", "input.alias": "$body.alias" },
         null,
         2,
       ),
@@ -193,7 +193,7 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
           required: ["name"],
           properties: {
             name: { type: "string" },
-            route: { type: "string" },
+            alias: { type: "string" },
           },
         },
         null,
@@ -209,17 +209,17 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "update_tenant",
       name: "Update Tenant",
-      description: "Updates a tenant's name or route.",
+      description: "Updates a tenant's name or alias.",
       method: "PATCH",
       path: "/api/custom/tenants/update",
       operationKind: "mutation",
-      graphql: `mutation UpdateTenant($id: ID!, $input: UpdateTenantInput!) {\n  updateTenant(id: $id, input: $input) {\n    id\n    name\n    route\n    status\n    updatedAt\n  }\n}`,
+      graphql: `mutation UpdateTenant($id: ID!, $input: UpdateTenantInput!) {\n  updateTenant(id: $id, input: $input) {\n    id\n    name\n    alias\n    status\n    updatedAt\n  }\n}`,
       authMode: "caller_context",
       variablesMapping: JSON.stringify(
         {
           id: "$query.id",
           "input.name": "$body.name",
-          "input.route": "$body.route",
+          "input.alias": "$body.alias",
         },
         null,
         2,
@@ -229,7 +229,7 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
           type: "object",
           properties: {
             name: { type: "string" },
-            route: { type: "string" },
+            alias: { type: "string" },
           },
         },
         null,

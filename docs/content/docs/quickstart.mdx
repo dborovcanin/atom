@@ -79,7 +79,7 @@ curl -s http://localhost:8080/graphql \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "query": "mutation { createTenant(input: { name: \"factory-a\", route: \"factory-a\" }) { id name route } }"
+    "query": "mutation { createTenant(input: { name: \"factory-a\", alias: \"factory-a\" }) { id name alias } }"
   }'
 ```
 

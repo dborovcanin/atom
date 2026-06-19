@@ -382,11 +382,11 @@ mutation {
 mutation {
   createTenant(input: {
     name: "factory-a",
-    route: "factory-a"
+    alias: "factory-a"
   }) {
     id
     name
-    route
+    alias
     status
   }
 }

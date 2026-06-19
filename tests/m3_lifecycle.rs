@@ -25,7 +25,7 @@ async fn fresh_tenant(pool: &sqlx::PgPool) -> uuid::Uuid {
         CreateTenant {
             id: None,
             name: format!("m3-{}", Uuid::new_v4()),
-            route: None,
+            alias: None,
             tags: vec![],
             attributes: serde_json::Value::Null,
         },
