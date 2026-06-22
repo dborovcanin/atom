@@ -14,6 +14,11 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AsyncCombobox,
+  type ComboOption,
+  type ComboPage,
+} from "@/components/ui/async-combobox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,24 +46,47 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { CapabilityApplicability } from "@/lib/access/capabilities";
+import {
+  AUTHZ_TARGET_KINDS,
+  type AuthzDebuggerInitialValues,
+  type AuthzTargetKind,
+} from "@/lib/authz/debugger-links";
 import { graphqlClient } from "@/lib/graphql/client";
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
 
+const PAGE_SIZE = 20;
+
 const ENTITIES_QUERY = `
-  query AuthzEntities { entities(limit: 200, offset: 0) { items { id name kind } } }
+  query AuthzEntities($q: String, $limit: Int, $offset: Int) {
+    entities(q: $q, limit: $limit, offset: $offset) { items { id name kind } }
+  }
+`;
+const ENTITY_QUERY = `
+  query AuthzEntity($id: ID!) { entity(id: $id) { id name kind } }
 `;
 const TENANTS_QUERY = `
-  query AuthzTenants { tenants(limit: 200, offset: 0) { items { id name } } }
+  query AuthzTenants($q: String, $limit: Int, $offset: Int) {
+    tenants(q: $q, limit: $limit, offset: $offset) { items { id name } }
+  }
 `;
 const CAPABILITIES_QUERY = `
-  query AuthzActions { actions(limit: 200, offset: 0) { items { id name applicability { objectKind objectType } } } }
+  query AuthzActions($limit: Int, $offset: Int) {
+    actions(limit: $limit, offset: $offset) { items { id name applicability { objectKind objectType } } }
+  }
 `;
 const RESOURCES_QUERY = `
-  query AuthzResources { resources(limit: 200, offset: 0) { items { id name kind } } }
+  query AuthzResources($q: String, $limit: Int, $offset: Int) {
+    resources(q: $q, limit: $limit, offset: $offset) { items { id name kind } }
+  }
+`;
+const RESOURCE_QUERY = `
+  query AuthzResource($id: ID!) { resource(id: $id) { id name kind } }
 `;
 const OBJECT_GROUPS_QUERY = `
-  query AuthzObjectGroups { objectGroups(limit: 200, offset: 0) { items { id name tenantId } } }
+  query AuthzObjectGroups($q: String, $limit: Int, $offset: Int) {
+    objectGroups(q: $q, limit: $limit, offset: $offset) { items { id name tenantId } }
+  }
 `;
 const EXPLAIN_MUTATION = `
   mutation Explain($input: AuthzCheckInput!) {
@@ -72,8 +100,6 @@ const EXPLAIN_MUTATION = `
 `;
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
-
-const NONE = "__none__";
 
 const TARGET_KINDS = [
   {
@@ -103,13 +129,11 @@ const TARGET_KINDS = [
   },
 ] as const;
 
-type TargetKind = (typeof TARGET_KINDS)[number]["value"];
-
 const schema = z
   .object({
     subjectId: z.string().min(1, "Subject is required"),
     action: z.string().min(1, "Action is required"),
-    targetKind: z.enum(["platform", "tenant", "entity", "resource", "group"]),
+    targetKind: z.enum(AUTHZ_TARGET_KINDS),
     targetId: z.string().optional(),
     context: z.string(),
   })
@@ -133,100 +157,203 @@ type ExplainResponse = {
   };
 };
 
+// ─── Lazy option fetchers ───────────────────────────────────────────────────
+
+function pageOf(items: ComboOption[], offset: number): ComboPage {
+  return {
+    items,
+    nextOffset: items.length === PAGE_SIZE ? offset + PAGE_SIZE : null,
+  };
+}
+
+async function fetchEntities({
+  search,
+  offset,
+  signal,
+}: FetchPageArgs): Promise<ComboPage> {
+  const data = await graphqlClient<{ entities: { items: EntityOption[] } }>({
+    query: ENTITIES_QUERY,
+    variables: { q: search || null, limit: PAGE_SIZE, offset },
+    signal,
+  });
+  return pageOf(
+    data.entities.items.map((e) => ({
+      value: e.id,
+      label: e.name,
+      detail: e.kind,
+    })),
+    offset,
+  );
+}
+
+async function fetchTenants({
+  search,
+  offset,
+  signal,
+}: FetchPageArgs): Promise<ComboPage> {
+  const data = await graphqlClient<{ tenants: { items: TenantOption[] } }>({
+    query: TENANTS_QUERY,
+    variables: { q: search || null, limit: PAGE_SIZE, offset },
+    signal,
+  });
+  return pageOf(
+    data.tenants.items.map((t) => ({ value: t.id, label: t.name })),
+    offset,
+  );
+}
+
+async function fetchResources({
+  search,
+  offset,
+  signal,
+}: FetchPageArgs): Promise<ComboPage> {
+  const data = await graphqlClient<{ resources: { items: ResourceOption[] } }>({
+    query: RESOURCES_QUERY,
+    variables: { q: search || null, limit: PAGE_SIZE, offset },
+    signal,
+  });
+  return pageOf(
+    data.resources.items.map((r) => ({
+      value: r.id,
+      label: r.name,
+      detail: r.kind,
+    })),
+    offset,
+  );
+}
+
+async function fetchObjectGroups({
+  search,
+  offset,
+  signal,
+}: FetchPageArgs): Promise<ComboPage> {
+  const data = await graphqlClient<{ objectGroups: { items: GroupOption[] } }>({
+    query: OBJECT_GROUPS_QUERY,
+    variables: { q: search || null, limit: PAGE_SIZE, offset },
+    signal,
+  });
+  return pageOf(
+    data.objectGroups.items.map((g) => ({
+      value: g.id,
+      label: g.name,
+      detail: g.tenantId ? `tenant ${g.tenantId.slice(0, 8)}…` : undefined,
+    })),
+    offset,
+  );
+}
+
+const emptyFetchPage = async (): Promise<ComboPage> => ({
+  items: [],
+  nextOffset: null,
+});
+
+async function fetchSelectedEntity({
+  value,
+  signal,
+}: FetchSelectedArgs): Promise<ComboOption | null> {
+  const data = await graphqlClient<{ entity: EntityOption | null }>({
+    query: ENTITY_QUERY,
+    variables: { id: value },
+    signal,
+  });
+  return data.entity
+    ? {
+        value: data.entity.id,
+        label: data.entity.name,
+        detail: data.entity.kind,
+      }
+    : null;
+}
+
+async function fetchSelectedResource({
+  value,
+  signal,
+}: FetchSelectedArgs): Promise<ComboOption | null> {
+  const data = await graphqlClient<{ resource: ResourceOption | null }>({
+    query: RESOURCE_QUERY,
+    variables: { id: value },
+    signal,
+  });
+  return data.resource
+    ? {
+        value: data.resource.id,
+        label: data.resource.name,
+        detail: data.resource.kind,
+      }
+    : null;
+}
+
+type FetchPageArgs = { search: string; offset: number; signal?: AbortSignal };
+type FetchSelectedArgs = { value: string; signal?: AbortSignal };
+
+type TargetFetcher = {
+  fetchPage: (args: FetchPageArgs) => Promise<ComboPage>;
+  fetchSelected?: (args: FetchSelectedArgs) => Promise<ComboOption | null>;
+};
+
+const TARGET_FETCHERS: Partial<Record<AuthzTargetKind, TargetFetcher>> = {
+  tenant: { fetchPage: fetchTenants },
+  entity: { fetchPage: fetchEntities, fetchSelected: fetchSelectedEntity },
+  resource: {
+    fetchPage: fetchResources,
+    fetchSelected: fetchSelectedResource,
+  },
+  group: { fetchPage: fetchObjectGroups },
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function AuthzDebugger() {
-  const entitiesQ = useQuery({
-    queryKey: ["authz-entities"],
-    queryFn: ({ signal }) =>
-      graphqlClient<{
-        entities: { items: EntityOption[] };
-      }>({
-        query: ENTITIES_QUERY,
-        signal,
-      }),
-    staleTime: 60_000,
-  });
-  const tenantsQ = useQuery({
-    queryKey: ["authz-tenants"],
-    queryFn: ({ signal }) =>
-      graphqlClient<{ tenants: { items: TenantOption[] } }>({
-        query: TENANTS_QUERY,
-        signal,
-      }),
-    staleTime: 60_000,
-  });
+export function AuthzDebugger({
+  initialValues = {},
+}: {
+  initialValues?: AuthzDebuggerInitialValues;
+}) {
+  // Actions are a bounded canonical set and are also needed to resolve grant
+  // names in the result trace, so they are loaded once rather than lazily.
   const actionsQ = useQuery({
     queryKey: ["authz-actions"],
     queryFn: ({ signal }) =>
-      graphqlClient<{
-        actions: {
-          items: ActionItem[];
-        };
-      }>({
+      graphqlClient<{ actions: { items: ActionItem[] } }>({
         query: CAPABILITIES_QUERY,
+        variables: { limit: 200, offset: 0 },
         signal,
       }),
     staleTime: 60_000,
   });
-  const resourcesQ = useQuery({
-    queryKey: ["authz-resources"],
-    queryFn: ({ signal }) =>
-      graphqlClient<{
-        resources: { items: ResourceOption[] };
-      }>({
-        query: RESOURCES_QUERY,
-        signal,
-      }),
-    staleTime: 60_000,
-  });
-  const objectGroupsQ = useQuery({
-    queryKey: ["authz-object-groups"],
-    queryFn: ({ signal }) =>
-      graphqlClient<{ objectGroups: { items: GroupOption[] } }>({
-        query: OBJECT_GROUPS_QUERY,
-        signal,
-      }),
-    staleTime: 60_000,
-  });
-
-  const entities = entitiesQ.data?.entities.items ?? [];
-  const tenants = tenantsQ.data?.tenants.items ?? [];
   const actions = actionsQ.data?.actions.items ?? [];
-  const resources = resourcesQ.data?.resources.items ?? [];
-  const objectGroups = objectGroupsQ.data?.objectGroups.items ?? [];
+  const actionOptions = React.useMemo<ComboOption[]>(
+    () => actions.map((a) => ({ value: a.id, label: a.name })),
+    [actions],
+  );
+  const fetchActionPage = React.useCallback(
+    async (): Promise<ComboPage> => ({
+      items: actionOptions,
+      nextOffset: null,
+    }),
+    [actionOptions],
+  );
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
-      subjectId: "",
+      subjectId: initialValues.subjectId ?? "",
       action: "",
-      targetKind: "resource",
-      targetId: "",
+      targetKind: initialValues.targetKind ?? "resource",
+      targetId: initialValues.targetId ?? "",
       context: "{}",
     },
   });
 
   const targetKind = form.watch("targetKind");
-  const targetOptions = React.useMemo(
-    () =>
-      targetOptionsFor(targetKind, {
-        tenants,
-        entities,
-        resources,
-        objectGroups,
-      }),
-    [targetKind, tenants, entities, resources, objectGroups],
-  );
+  const targetFetcher = TARGET_FETCHERS[targetKind];
   const targetKindMeta = TARGET_KINDS.find((item) => item.value === targetKind);
-  const selectedSubject = entities.find(
-    (entity) => entity.id === form.watch("subjectId"),
-  );
+
+  const [selectedSubject, setSelectedSubject] =
+    React.useState<ComboOption | null>(null);
+  const [selectedTarget, setSelectedTarget] =
+    React.useState<ComboOption | null>(null);
   const selectedAction = actions.find(
     (action) => action.id === form.watch("action"),
-  );
-  const selectedTarget = targetOptions.find(
-    (target) => target.id === form.watch("targetId"),
   );
 
   const explain = useMutation({
@@ -272,27 +399,19 @@ export function AuthzDebugger() {
                 render={({ field }) => (
                   <FormItem>
                     <RequiredFormLabel required>Who</RequiredFormLabel>
-                    <Select
-                      value={field.value || NONE}
-                      onValueChange={(v) => field.onChange(v === NONE ? "" : v)}
-                    >
-                      <FormControl>
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value={NONE}>Select subject</SelectItem>
-                        {entities.map((e) => (
-                          <SelectItem key={e.id} value={e.id}>
-                            {e.name}
-                            <span className="ml-1.5 text-xs text-muted-foreground">
-                              {e.kind}
-                            </span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <FormControl>
+                      <AsyncCombobox
+                        value={field.value}
+                        onChange={field.onChange}
+                        onSelectedChange={setSelectedSubject}
+                        queryKey={["authz-entities"]}
+                        fetchPage={fetchEntities}
+                        fetchSelected={fetchSelectedEntity}
+                        placeholder="Select subject"
+                        searchPlaceholder="Search entities…"
+                        emptyText="No entities found."
+                      />
+                    </FormControl>
                     <FormDescription>
                       The entity making the request, for example a user, client,
                       or service.
@@ -308,24 +427,22 @@ export function AuthzDebugger() {
                 render={({ field }) => (
                   <FormItem>
                     <RequiredFormLabel required>Can do</RequiredFormLabel>
-                    <Select
-                      value={field.value || NONE}
-                      onValueChange={(v) => field.onChange(v === NONE ? "" : v)}
-                    >
-                      <FormControl>
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value={NONE}>Select action</SelectItem>
-                        {actions.map((action) => (
-                          <SelectItem key={action.id} value={action.id}>
-                            {action.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <FormControl>
+                      <AsyncCombobox
+                        value={field.value}
+                        onChange={field.onChange}
+                        queryKey={[
+                          "authz-actions",
+                          "combo",
+                          actionOptions.length,
+                        ]}
+                        mode="client"
+                        fetchPage={fetchActionPage}
+                        placeholder="Select action"
+                        searchPlaceholder="Search actions…"
+                        emptyText="No actions found."
+                      />
+                    </FormControl>
                     <FormDescription>
                       Action names are the canonical Atom permissions, such as
                       read, write, publish, role.manage, or policy.manage.
@@ -344,7 +461,7 @@ export function AuthzDebugger() {
                     <Select
                       value={field.value}
                       onValueChange={(v) => {
-                        const next = v as TargetKind;
+                        const next = v as AuthzTargetKind;
                         field.onChange(next);
                         form.setValue("targetId", "");
                       }}
@@ -379,37 +496,20 @@ export function AuthzDebugger() {
                       <RequiredFormLabel required>
                         {targetKindMeta?.label ?? "Target"}
                       </RequiredFormLabel>
-                      <Select
-                        value={field.value || NONE}
-                        onValueChange={(v) =>
-                          field.onChange(v === NONE ? "" : v)
-                        }
-                      >
-                        <FormControl>
-                          <SelectTrigger className="w-full">
-                            <SelectValue />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value={NONE}>Select target</SelectItem>
-                          {targetOptions.map((target) => (
-                            <SelectItem key={target.id} value={target.id}>
-                              {target.label}
-                              {target.detail ? (
-                                <span className="ml-1.5 text-xs text-muted-foreground">
-                                  {target.detail}
-                                </span>
-                              ) : null}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {targetOptions.length === 0 ? (
-                        <FormDescription>
-                          No targets of this type were returned for the current
-                          user.
-                        </FormDescription>
-                      ) : null}
+                      <FormControl>
+                        <AsyncCombobox
+                          key={targetKind}
+                          value={field.value ?? ""}
+                          onChange={field.onChange}
+                          onSelectedChange={setSelectedTarget}
+                          queryKey={["authz-target", targetKind]}
+                          fetchPage={targetFetcher?.fetchPage ?? emptyFetchPage}
+                          fetchSelected={targetFetcher?.fetchSelected}
+                          placeholder="Select target"
+                          searchPlaceholder={`Search ${targetKindMeta?.label.toLowerCase() ?? "targets"}…`}
+                          emptyText="No targets found."
+                        />
+                      </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -422,7 +522,7 @@ export function AuthzDebugger() {
                 </div>
                 <div>
                   <span className="font-medium">
-                    {selectedSubject?.name ?? "Selected subject"}
+                    {selectedSubject?.label ?? "Selected subject"}
                   </span>{" "}
                   wants to{" "}
                   <span className="font-medium">
@@ -542,45 +642,6 @@ type EntityOption = { id: string; name: string; kind: string };
 type TenantOption = { id: string; name: string };
 type ResourceOption = { id: string; name: string; kind: string };
 type GroupOption = { id: string; name: string; tenantId?: string | null };
-type TargetOption = { id: string; label: string; detail?: string };
-
-function targetOptionsFor(
-  targetKind: TargetKind,
-  data: {
-    tenants: TenantOption[];
-    entities: EntityOption[];
-    resources: ResourceOption[];
-    objectGroups: GroupOption[];
-  },
-): TargetOption[] {
-  switch (targetKind) {
-    case "platform":
-      return [];
-    case "tenant":
-      return data.tenants.map((tenant) => ({
-        id: tenant.id,
-        label: tenant.name,
-      }));
-    case "entity":
-      return data.entities.map((entity) => ({
-        id: entity.id,
-        label: entity.name,
-        detail: entity.kind,
-      }));
-    case "resource":
-      return data.resources.map((resource) => ({
-        id: resource.id,
-        label: resource.name,
-        detail: resource.kind,
-      }));
-    case "group":
-      return data.objectGroups.map((group) => ({
-        id: group.id,
-        label: group.name,
-        detail: group.tenantId ? `tenant ${group.tenantId.slice(0, 8)}...` : "",
-      }));
-  }
-}
 
 function parseContext(value: string): Record<string, unknown> {
   try {
@@ -603,7 +664,7 @@ function parseContext(value: string): Record<string, unknown> {
 function buildAuthzInput(values: {
   subjectId: string;
   action: string;
-  targetKind: TargetKind;
+  targetKind: AuthzTargetKind;
   targetId?: string;
   context: Record<string, unknown>;
 }) {

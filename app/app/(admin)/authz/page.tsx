@@ -1,9 +1,16 @@
 import type { Metadata } from "next";
 import { AuthzDebugger } from "@/components/authz-debugger";
+import { parseAuthzDebuggerInitialValues } from "@/lib/authz/debugger-links";
 
 export const metadata: Metadata = { title: "Authorization" };
 
-export default function AuthzPage() {
+export default async function AuthzPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const initialValues = parseAuthzDebuggerInitialValues(await searchParams);
+
   return (
     <div className="grid gap-4">
       <div>
@@ -14,7 +21,7 @@ export default function AuthzPage() {
           Visualize why an Atom authorization decision was allowed or denied.
         </p>
       </div>
-      <AuthzDebugger />
+      <AuthzDebugger initialValues={initialValues} />
     </div>
   );
 }

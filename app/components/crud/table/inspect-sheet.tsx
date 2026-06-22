@@ -1,3 +1,5 @@
+import { Activity } from "lucide-react";
+import Link from "next/link";
 import { CapabilityInspectDetails } from "@/components/capabilities/capability-inspect-details";
 import { DetailFields } from "@/components/crud/table/detail-fields";
 import type { Row } from "@/components/crud/table/types";
@@ -20,6 +22,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { authzDebuggerHref } from "@/lib/authz/debugger-links";
 import type { CrudResource } from "@/lib/crud/resources";
 
 export function CrudInspectSheet({
@@ -88,6 +91,7 @@ function InspectBody({
         </TabsList>
         <TabsContent value="details" className="grid gap-3">
           <EntityInspectDetails row={inspected} />
+          <InspectAuthzAction resourceKey={resourceKey} row={inspected} />
           {inspected?.id ? (
             <EntityCredentials entityId={String(inspected.id)} />
           ) : null}
@@ -111,7 +115,12 @@ function InspectBody({
     );
   }
   if (resourceKey === "resources") {
-    return <ResourceInspectDetails row={inspected} />;
+    return (
+      <>
+        <ResourceInspectDetails row={inspected} />
+        <InspectAuthzAction resourceKey={resourceKey} row={inspected} />
+      </>
+    );
   }
   if (resourceKey === "roles") {
     return (
@@ -127,6 +136,44 @@ function InspectBody({
     return <CapabilityInspectDetails row={inspected} />;
   }
   return <DetailFields row={inspected} />;
+}
+
+function InspectAuthzAction({
+  resourceKey,
+  row,
+}: {
+  resourceKey: "entities" | "resources";
+  row: Row | null;
+}) {
+  if (!row?.id) return null;
+
+  const name = String(row.name ?? row.id);
+  const isEntity = resourceKey === "entities";
+  const href = isEntity
+    ? authzDebuggerHref({ subjectId: String(row.id) })
+    : authzDebuggerHref({
+        targetKind: "resource",
+        targetId: String(row.id),
+      });
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-dashed bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0">
+        <div className="text-sm font-medium">Authorization debugger</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {isEntity
+            ? `Use ${name} as the request subject.`
+            : `Use ${name} as the target object.`}
+        </p>
+      </div>
+      <Button asChild className="shrink-0" size="sm" variant="outline">
+        <Link href={href}>
+          <Activity />
+          Check authorization
+        </Link>
+      </Button>
+    </div>
+  );
 }
 
 function usesWideInspectSheet(resourceKey: string) {
