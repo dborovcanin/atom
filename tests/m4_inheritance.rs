@@ -33,7 +33,7 @@ async fn tenant(pool: &sqlx::PgPool) -> Uuid {
         CreateTenant {
             id: None,
             name: format!("m4-{}", Uuid::new_v4()),
-            route: None,
+            alias: None,
             tags: vec![],
             attributes: serde_json::Value::Null,
         },

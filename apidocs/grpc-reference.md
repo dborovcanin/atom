@@ -9,11 +9,14 @@
     - [CheckRequest](#atom-v1-CheckRequest)
     - [CheckRequest.ContextEntry](#atom-v1-CheckRequest-ContextEntry)
     - [CheckResponse](#atom-v1-CheckResponse)
+    - [ResolveAliasRequest](#atom-v1-ResolveAliasRequest)
+    - [ResolveAliasResponse](#atom-v1-ResolveAliasResponse)
     - [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest)
     - [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse)
     - [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest)
     - [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse)
   
+    - [AliasService](#atom-v1-AliasService)
     - [AuthService](#atom-v1-AuthService)
     - [AuthzService](#atom-v1-AuthzService)
     - [CertificateService](#atom-v1-CertificateService)
@@ -113,6 +116,41 @@
 
 
 
+<a name="atom-v1-ResolveAliasRequest"></a>
+
+### ResolveAliasRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tenant_id | [string](#string) |  | Tenant selector — exactly one of tenant_id, tenant_alias, or global must be set. tenant_alias is the case-folded tenant slug. |
+| tenant_alias | [string](#string) |  |  |
+| object_kind | [string](#string) |  | Which table the object alias addresses: &#34;entity&#34; (clients/devices) or &#34;resource&#34; (channels). Other values are rejected. Generic on purpose — no domain/channel vocabulary. |
+| object_alias | [string](#string) |  | The object&#39;s alias slug, unique within the tenant. |
+| global | [bool](#bool) |  | Resolve an entity or resource whose tenant_id is NULL. |
+
+
+
+
+
+
+<a name="atom-v1-ResolveAliasResponse"></a>
+
+### ResolveAliasResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tenant_id | [string](#string) |  | empty string for global objects |
+| object_id | [string](#string) |  |  |
+
+
+
+
+
+
 <a name="atom-v1-ResolveCertificateRequest"></a>
 
 ### ResolveCertificateRequest
@@ -182,6 +220,20 @@
  
 
  
+
+
+<a name="atom-v1-AliasService"></a>
+
+### AliasService
+AliasService resolves human-friendly alias slugs to canonical UUIDs.
+Atom owns the alias registry and its uniqueness; callers (e.g. a message
+broker) resolve an alias once, cache the UUID, then authorize by UUID via
+AuthzService.Check. Resolution is capability-neutral — it reveals only the
+UUIDs; the Check call is the authorization gate.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| ResolveAlias | [ResolveAliasRequest](#atom-v1-ResolveAliasRequest) | [ResolveAliasResponse](#atom-v1-ResolveAliasResponse) |  |
 
 
 <a name="atom-v1-AuthService"></a>

@@ -21,6 +21,15 @@ service CertificateService {
   rpc RevokeEntityCertificates(RevokeEntityCertificatesRequest) returns (RevokeEntityCertificatesResponse);
 }
 
+// AliasService resolves human-friendly alias slugs to canonical UUIDs.
+// Atom owns the alias registry and its uniqueness; callers (e.g. a message
+// broker) resolve an alias once, cache the UUID, then authorize by UUID via
+// AuthzService.Check. Resolution is capability-neutral — it reveals only the
+// UUIDs; the Check call is the authorization gate.
+service AliasService {
+  rpc ResolveAlias(ResolveAliasRequest) returns (ResolveAliasResponse);
+}
+
 message CheckRequest {
   string subject_id  = 1;
   string action      = 2;  // capability name, e.g. "publish"
@@ -75,4 +84,24 @@ message RevokeEntityCertificatesRequest {
 
 message RevokeEntityCertificatesResponse {
   uint64 revoked = 1;
+}
+
+message ResolveAliasRequest {
+  // Tenant selector — exactly one of tenant_id, tenant_alias, or global must
+  // be set. tenant_alias is the case-folded tenant slug.
+  string tenant_id    = 1;
+  string tenant_alias = 2;
+  // Which table the object alias addresses: "entity" (clients/devices) or
+  // "resource" (channels). Other values are rejected. Generic on purpose —
+  // no domain/channel vocabulary.
+  string object_kind  = 3;
+  // The object's alias slug, unique within the tenant.
+  string object_alias = 4;
+  // Resolve an entity or resource whose tenant_id is NULL.
+  bool global = 5;
+}
+
+message ResolveAliasResponse {
+  string tenant_id = 1; // empty string for global objects
+  string object_id = 2;
 }

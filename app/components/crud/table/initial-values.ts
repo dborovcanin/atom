@@ -43,6 +43,7 @@ export function resourceFormInitialValues(row: Row): ResourceFormInitialValues {
     id: String(row.id),
     kind: typeof row.kind === "string" ? row.kind : "",
     name: typeof row.name === "string" ? row.name : "",
+    alias: typeof row.alias === "string" ? row.alias : "",
     tenantId: typeof row.tenantId === "string" ? row.tenantId : "",
     ownerId: typeof row.ownerId === "string" ? row.ownerId : "",
     attributes:
@@ -87,6 +88,7 @@ export function entityFormInitialValues(row: Row): EntityFormInitialValues {
   return {
     id: String(row.id),
     name: typeof row.name === "string" ? row.name : "",
+    alias: typeof row.alias === "string" ? row.alias : "",
     kind: (ENTITY_KINDS as readonly string[]).includes(rawKind)
       ? (rawKind as EntityFormInitialValues["kind"])
       : "human",
@@ -105,7 +107,7 @@ export function tenantFormInitialValues(row: Row): TenantFormInitialValues {
   return {
     id: String(row.id),
     name: typeof row.name === "string" ? row.name : "",
-    route: typeof row.route === "string" ? row.route : "",
+    alias: typeof row.alias === "string" ? row.alias : "",
     tags: Array.isArray(row.tags) ? row.tags.map((tag) => String(tag)) : [],
     attributes:
       row.attributes && typeof row.attributes === "object"

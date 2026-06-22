@@ -58,7 +58,7 @@ const STARTER_OPERATIONS = [
     items {
       id
       name
-      route
+      alias
       status
       createdAt
     }

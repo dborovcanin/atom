@@ -71,6 +71,16 @@ Atom stores security state in Postgres. All primary keys are UUIDs. Most objects
 | `audit_logs` | Immutable history of security-relevant events. |
 | `certificate_crl_state` | Cached CRL state for the active mounted certificate issuer. |
 
+## Aliases
+
+Every `tenants`, `entities`, and `resources` row may carry an optional `alias`: a short, human-friendly handle used in place of the UUID. The UUID stays the canonical identity — aliases are a convenience layer for addressing and never appear as foreign keys, audit subjects, or authorization scope.
+
+- **Slug shape.** An alias is a lowercase slug of 1–63 characters using `a–z`, `0–9`, and `-`, with no leading or trailing dash. It is case-folded on write, may not be UUID-shaped, and is validated both in the service and by a database `CHECK`.
+- **Uniqueness.** Tenant aliases are unique across the platform. Entity and resource aliases are unique **within their tenant**, so the same alias (for example `watermeters`) may be reused in different tenants.
+- **Resolution.** `AliasService.ResolveAlias` (gRPC) resolves a tenant alias plus an object alias to the underlying UUIDs in one call. Global entities and resources use the request's explicit `global` selector. Resolution is capability-neutral; the authorization gate is the subsequent `authz` check by UUID.
+
+Aliases stay an alias, not a replacement: rename one and every UUID-keyed grant, session, and audit row is unaffected.
+
 ## Entity And Credential State
 
 Entities are the universal subject type. A user, device, service, workload, and application are all entities with different `kind` values.

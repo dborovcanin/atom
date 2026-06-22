@@ -35,7 +35,7 @@ impl TenantQuery {
         ctx: &Context<'_>,
         q: Option<String>,
         name: Option<String>,
-        route: Option<String>,
+        alias: Option<String>,
         status: Option<GqlTenantStatus>,
         limit: Option<i32>,
         offset: Option<i32>,
@@ -45,7 +45,7 @@ impl TenantQuery {
         let params = ListTenants {
             q,
             name,
-            route,
+            alias,
             status: parse_optional_tenant_status(status),
             limit: limit.map(i64::from).unwrap_or(20),
             offset: offset.map(i64::from).unwrap_or(0),
@@ -245,7 +245,7 @@ impl TenantMutation {
             tenant_model::CreateTenant {
                 id: parse_optional_id(input.id, "id")?,
                 name: input.name,
-                route: input.route,
+                alias: input.alias,
                 tags: input.tags.unwrap_or_default(),
                 attributes: input.attributes.unwrap_or(serde_json::Value::Null),
             },
@@ -281,7 +281,7 @@ impl TenantMutation {
             tenant_id,
             tenant_model::UpdateTenant {
                 name: input.name,
-                route: input.route,
+                alias: input.alias.into(),
                 tags: input.tags,
                 attributes: input.attributes,
             },

@@ -9,7 +9,7 @@ use super::enums::TenantStatus;
 pub struct Tenant {
     pub id: Uuid,
     pub name: String,
-    pub route: Option<String>,
+    pub alias: Option<String>,
     pub status: TenantStatus,
     pub tags: Vec<String>,
     pub attributes: Value,
@@ -23,7 +23,7 @@ pub struct Tenant {
 pub struct CreateTenant {
     pub id: Option<Uuid>,
     pub name: String,
-    pub route: Option<String>,
+    pub alias: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -33,7 +33,11 @@ pub struct CreateTenant {
 #[derive(Debug, Deserialize)]
 pub struct UpdateTenant {
     pub name: Option<String>,
-    pub route: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::alias::deserialize_alias_update"
+    )]
+    pub alias: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub attributes: Option<Value>,
 }
@@ -42,7 +46,7 @@ pub struct UpdateTenant {
 pub struct ListTenants {
     pub q: Option<String>,
     pub name: Option<String>,
-    pub route: Option<String>,
+    pub alias: Option<String>,
     pub status: Option<TenantStatus>,
     #[serde(default = "default_limit")]
     pub limit: i64,

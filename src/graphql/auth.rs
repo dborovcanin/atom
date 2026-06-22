@@ -58,7 +58,7 @@ impl AuthMutation {
             &input.identifier,
             &input.secret,
             parse_optional_id(input.tenant_id, "tenantId")?,
-            input.tenant_route.as_deref(),
+            input.tenant_alias.as_deref(),
         )
         .await
         .map_err(gql_error)?;

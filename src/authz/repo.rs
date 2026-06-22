@@ -25,6 +25,7 @@ use crate::{
             ActionAssignmentRule, ActionAssignmentRuleList, CreateActionAssignmentRule,
             ListActionAssignmentRules,
         },
+        alias::AliasObjectClass,
         capability::{
             Capability, CapabilityApplicability, CapabilityApplicabilityEntry,
             CapabilityApplicabilityInput, CapabilityApplicabilityList, CreateCapability,
@@ -60,15 +61,17 @@ pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resou
         req.attributes
     };
     let parent_group_id = parent_group_id_from_attrs(&attrs)?;
+    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let resource = sqlx::query_as::<_, Resource>(
-        r#"INSERT INTO resources (id, kind, name, tenant_id, owner_id, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at"#,
+        r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.kind)
     .bind(req.name)
+    .bind(alias)
     .bind(req.tenant_id)
     .bind(req.owner_id)
     .bind(attrs)
@@ -84,7 +87,7 @@ pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resou
 
 pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError> {
     sqlx::query_as::<_, Resource>(
-        "SELECT id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at FROM resources WHERE id = $1",
+        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at FROM resources WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -101,7 +104,7 @@ pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Re
     }
 
     sqlx::query_as::<_, Resource>(
-        r#"SELECT id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at
+        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at
            FROM resources
            WHERE id = ANY($1::uuid[])
            ORDER BY array_position($1::uuid[], id)"#,
@@ -134,12 +137,12 @@ pub async fn list_resources(
                JOIN target_groups tg ON tg.id = gh.parent_id
                WHERE $5::boolean
            )
-           SELECT r.id, r.kind, r.name, r.tenant_id, r.owner_id, r.attributes, r.created_at, r.updated_at
+           SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes, r.created_at, r.updated_at
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
-             AND ($3::text IS NULL OR r.name ILIKE $3 OR r.attributes::text ILIKE $3)
+             AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
            ORDER BY r.created_at DESC
            LIMIT $6 OFFSET $7"#,
@@ -169,7 +172,7 @@ pub async fn list_resources(
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
-             AND ($3::text IS NULL OR r.name ILIKE $3 OR r.attributes::text ILIKE $3)
+             AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))"#,
     )
     .bind(kind)
@@ -195,18 +198,24 @@ pub async fn update_resource(
         .and_then(|attrs| attrs.get("parent_group_id"))
         .map(parent_group_id_from_value)
         .transpose()?;
+    let alias = crate::models::alias::validate_alias_update(req.alias)?;
+    let alias_is_set = alias.is_some();
+    let alias = alias.flatten();
     let mut tx = pool.begin().await.map_err(db_err)?;
     let resource = sqlx::query_as::<_, Resource>(
         r#"UPDATE resources
            SET name       = COALESCE($2, name),
                attributes = COALESCE($3, attributes),
+               alias      = CASE WHEN $4 THEN $5 ELSE alias END,
                updated_at = now()
            WHERE id = $1
-           RETURNING id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at"#,
+           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.attributes)
+    .bind(alias_is_set)
+    .bind(alias)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -235,6 +244,90 @@ pub async fn delete_resource(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
         return Err(AppError::not_found(format!("resource {id} not found")));
     }
     Ok(())
+}
+
+/// The UUIDs an alias path resolves to.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedAlias {
+    pub tenant_id: Option<Uuid>,
+    pub object_id: Uuid,
+}
+
+/// Resolve a human alias path to canonical UUIDs.
+///
+/// Two-level: first resolve the tenant (by id, or case-folded `alias`), then the
+/// object (entity or resource) by its case-folded `alias` within that tenant.
+/// Global objects are selected explicitly and resolve with no tenant UUID.
+/// Resolution is capability-neutral — it reveals only the UUIDs; the actual
+/// authorization gate is the subsequent `authz` check by UUID. Returns
+/// `NotFound` if either level is missing.
+pub async fn resolve_alias(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    tenant_alias: Option<&str>,
+    global: bool,
+    class: AliasObjectClass,
+    object_alias: &str,
+) -> Result<ResolvedAlias, AppError> {
+    let tenant_alias = tenant_alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty());
+    let tenant_id = match (tenant_id, tenant_alias, global) {
+        (Some(id), None, false) => Some(id),
+        (None, Some(alias), false) => {
+            let id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM tenants WHERE lower(alias) = lower($1)",
+            )
+            .bind(alias)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::not_found(format!("tenant alias '{alias}' not found")))?;
+            Some(id)
+        }
+        (None, None, true) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "provide exactly one tenant selector: tenant_id, tenant_alias, or global",
+            ))
+        }
+    };
+
+    let object_alias = object_alias.trim().to_ascii_lowercase();
+    if object_alias.is_empty() {
+        return Err(AppError::bad_request("object_alias must not be empty"));
+    }
+
+    let sql = match class {
+        AliasObjectClass::Entity => {
+            "SELECT id FROM entities \
+             WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
+               AND lower(alias) = $2"
+        }
+        AliasObjectClass::Resource => {
+            "SELECT id FROM resources \
+             WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
+               AND lower(alias) = $2"
+        }
+    };
+
+    let object_id = sqlx::query_scalar::<_, Uuid>(sql)
+        .bind(tenant_id)
+        .bind(&object_alias)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            let scope = tenant_id
+                .map(|id| format!("tenant {id}"))
+                .unwrap_or_else(|| "global scope".to_string());
+            AppError::not_found(format!("alias '{object_alias}' not found in {scope}"))
+        })?;
+
+    Ok(ResolvedAlias {
+        tenant_id,
+        object_id,
+    })
 }
 
 pub async fn get_resource_parent_group(
@@ -3327,7 +3420,7 @@ pub async fn entity_access(
     params: AccessQuery,
 ) -> Result<EntityAccessResponse, AppError> {
     let entity = sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                   status, attributes, created_at, updated_at
            FROM entities
            WHERE id = $1"#,
@@ -4332,7 +4425,7 @@ pub async fn effective_capabilities(
 ) -> Result<EffectiveCapabilitiesResponse, AppError> {
     use sqlx::Row;
     let entity = sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                   status, attributes, created_at, updated_at
            FROM entities
            WHERE id = $1"#,
@@ -4698,7 +4791,7 @@ pub async fn unprotected_resources(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, Resource>(
-        r#"SELECT id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at
+        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at
            FROM resources r
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR kind = $2)

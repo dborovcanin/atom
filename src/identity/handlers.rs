@@ -133,7 +133,7 @@ pub async fn login(
                 &req.identifier,
                 &req.secret,
                 req.tenant_id,
-                req.tenant_route.as_deref(),
+                req.tenant_alias.as_deref(),
             )
             .await?;
             let cookie = auth_cookie(
