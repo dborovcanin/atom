@@ -203,6 +203,38 @@ async fn authorized(
 
 #[tokio::test]
 #[ignore]
+async fn authorized_resource_kinds_include_custom_readable_kinds_only() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-resource-kinds").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    make_resource(&pool, tenant_id, "channel", "channel").await;
+    make_resource(&pool, tenant_id, "custom_stream", "custom-stream").await;
+    make_resource(&pool, tenant_id, "rule", "unreadable-rule").await;
+    let read_id = action_id(&pool, "read").await;
+
+    for kind in ["channel", "custom_stream"] {
+        let role_id = make_role_with_block(
+            &pool,
+            tenant_id,
+            "object_type",
+            Some("resource"),
+            Some(&format!("resource:{kind}")),
+            None,
+            read_id,
+        )
+        .await;
+        assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
+    }
+
+    let kinds = atom::authz::repo::authorized_resource_kinds(&pool, subject_id, Some(tenant_id))
+        .await
+        .expect("authorized resource kinds");
+
+    assert_eq!(kinds, vec!["channel", "custom_stream"]);
+}
+
+#[tokio::test]
+#[ignore]
 async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, "m17-deny").await;
@@ -380,4 +412,183 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     )
     .await;
     assert_eq!(tree_ids, vec![child_device_id]);
+}
+
+/// A deny assigned to an *ancestor* principal group must remove the object from
+/// the listing, matching the PDP. The subject reaches the deny only through a
+/// parent of its direct group, so the listing's subject_groups CTE must resolve
+/// principal-group membership recursively (it previously used direct members
+/// only, so the deny was invisible and the object was wrongly listed).
+#[tokio::test]
+#[ignore]
+async fn authorized_listing_honours_ancestor_group_deny() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-ancestor-deny").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let channel_id = make_resource(&pool, tenant_id, "channel", "channel").await;
+    let read_id = action_id(&pool, "read").await;
+
+    // Direct allow: subject can read channels (object alone would be listable).
+    let allow_role = make_role_with_block(
+        &pool,
+        tenant_id,
+        "object_type",
+        Some("resource"),
+        Some("resource:channel"),
+        None,
+        read_id,
+    )
+    .await;
+    assign_role_to_entity(&pool, tenant_id, subject_id, allow_role).await;
+
+    // Subject is a direct member of the child group; the parent is its ancestor.
+    let parent_group = make_group(&pool, tenant_id, "principal", "parent").await;
+    let child_group = make_group(&pool, tenant_id, "principal", "child").await;
+    sqlx::query(
+        "INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
+    )
+    .bind(parent_group)
+    .bind(child_group)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("principal hierarchy");
+    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+        .bind(child_group)
+        .bind(subject_id)
+        .execute(&pool)
+        .await
+        .expect("child membership");
+
+    // Deny read on the channel, assigned to the ancestor (parent) group.
+    let deny_block: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert deny block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(deny_block)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("deny action");
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'group', $2, $3)"#,
+    )
+    .bind(tenant_id)
+    .bind(parent_group)
+    .bind(deny_block)
+    .execute(&pool)
+    .await
+    .expect("assign deny to parent group");
+
+    let ids = authorized(
+        &pool,
+        subject_id,
+        "read",
+        "resource",
+        Some("resource:channel"),
+        tenant_id,
+    )
+    .await;
+    assert!(
+        ids.is_empty(),
+        "a deny on an ancestor principal group must remove the object from the listing, got: {ids:?}"
+    );
+
+    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        .bind(channel_id)
+        .execute(&pool)
+        .await;
+}
+
+/// An exact-object block whose assignment is bounded to a different tenant than
+/// the object's owner must not surface the object in a listing — the listing now
+/// compares the assignment edge's tenant with the candidate object's tenant, as
+/// the PDP and gates do.
+#[tokio::test]
+#[ignore]
+async fn authorized_listing_honours_assignment_tenant_boundary() {
+    let pool = common::pool().await;
+    let owner_tenant = make_tenant(&pool, "m16-owner").await; // owns the object
+    let other_tenant = make_tenant(&pool, "m16-other").await; // the assignment boundary
+    let subject_id = make_entity(&pool, other_tenant, "human", "subject").await;
+    let channel_id = make_resource(&pool, owner_tenant, "channel", "channel").await;
+    let read_id = action_id(&pool, "read").await;
+
+    // Exact-object read allow on the owner_tenant object.
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect)
+           VALUES ('object', $1, 'allow') RETURNING id"#,
+    )
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert object block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    // Assignment bounded to other_tenant — not the object's owner.
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(other_tenant)
+    .bind(subject_id)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("cross-tenant direct policy");
+
+    let ids = authorized(
+        &pool,
+        subject_id,
+        "read",
+        "resource",
+        Some("resource:channel"),
+        owner_tenant,
+    )
+    .await;
+    assert!(
+        !ids.contains(&channel_id),
+        "a cross-tenant exact-object grant must not surface the object, got: {ids:?}"
+    );
+
+    // Control: rebind the assignment to the object's tenant → now listed.
+    sqlx::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
+        .bind(owner_tenant)
+        .bind(block_id)
+        .execute(&pool)
+        .await
+        .expect("rebind");
+    let ids = authorized(
+        &pool,
+        subject_id,
+        "read",
+        "resource",
+        Some("resource:channel"),
+        owner_tenant,
+    )
+    .await;
+    assert!(
+        ids.contains(&channel_id),
+        "a same-tenant exact-object grant must surface the object"
+    );
+
+    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        .bind(channel_id)
+        .execute(&pool)
+        .await;
 }

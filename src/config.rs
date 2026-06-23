@@ -219,7 +219,10 @@ impl Default for GraphqlLimitConfig {
         Self {
             max_depth: 20,
             max_complexity: 1_000,
-            introspection_enabled: true,
+            // Off by default: introspection exposes the full schema, so
+            // production is safe without remembering to disable it. Dev opts in
+            // with ATOM_GRAPHQL_INTROSPECTION_ENABLED=true.
+            introspection_enabled: false,
         }
     }
 }
@@ -740,7 +743,7 @@ mod tests {
     fn production_hardening_config_defaults_are_parsed() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
-        std::env::set_var("DATABASE_URL", "postgres://atom:atom@localhost/atom");
+        let _db_guard = DatabaseUrlGuard::set();
 
         let cfg = Config::from_env().expect("config");
 
@@ -752,52 +755,86 @@ mod tests {
         assert_eq!(cfg.login_failure_limit, 5);
         assert_eq!(cfg.login_failure_window_secs, 900);
         assert!(cfg.rate_limits.enabled);
+        assert!(
+            !cfg.graphql_limits.introspection_enabled,
+            "GraphQL introspection must default off"
+        );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn graphql_introspection_opts_in_via_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_GRAPHQL_INTROSPECTION_ENABLED", "true");
+
+        let cfg = Config::from_env().expect("config");
         assert!(cfg.graphql_limits.introspection_enabled);
 
         clear_hardening_env();
-        std::env::remove_var("DATABASE_URL");
     }
 
     #[test]
     fn invalid_pool_env_value_fails_config() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
-        std::env::set_var("DATABASE_URL", "postgres://atom:atom@localhost/atom");
+        let _db_guard = DatabaseUrlGuard::set();
         std::env::set_var("ATOM_DB_MAX_CONNECTIONS", "not-a-number");
 
         let err = Config::from_env().expect_err("invalid config");
         assert!(err.to_string().contains("ATOM_DB_MAX_CONNECTIONS"));
 
         clear_hardening_env();
-        std::env::remove_var("DATABASE_URL");
     }
 
     #[test]
     fn key_encryption_key_must_be_base64_32_bytes() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
-        std::env::set_var("DATABASE_URL", "postgres://atom:atom@localhost/atom");
+        let _db_guard = DatabaseUrlGuard::set();
         std::env::set_var("ATOM_KEY_ENCRYPTION_KEY", "too-short");
 
         let err = Config::from_env().expect_err("invalid key");
         assert!(err.to_string().contains("ATOM_KEY_ENCRYPTION_KEY"));
 
         clear_hardening_env();
-        std::env::remove_var("DATABASE_URL");
     }
 
     #[test]
     fn trusted_proxy_cidrs_must_be_valid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
-        std::env::set_var("DATABASE_URL", "postgres://atom:atom@localhost/atom");
+        let _db_guard = DatabaseUrlGuard::set();
         std::env::set_var("ATOM_TRUSTED_PROXY_CIDRS", "10.0.0.0/8,not-a-cidr");
 
         let err = Config::from_env().expect_err("invalid trusted proxy cidr");
         assert!(err.to_string().contains("ATOM_TRUSTED_PROXY_CIDRS"));
 
         clear_hardening_env();
-        std::env::remove_var("DATABASE_URL");
+    }
+
+    /// Sets `DATABASE_URL` to a fixture value for config-parsing tests and
+    /// restores the prior value (or unsets it) on drop, so DB-gated tests that
+    /// share the same test binary keep the real `DATABASE_URL`.
+    struct DatabaseUrlGuard(Option<String>);
+
+    impl DatabaseUrlGuard {
+        fn set() -> Self {
+            let prev = std::env::var("DATABASE_URL").ok();
+            std::env::set_var("DATABASE_URL", "postgres://atom:atom@localhost/atom");
+            Self(prev)
+        }
+    }
+
+    impl Drop for DatabaseUrlGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("DATABASE_URL", value),
+                None => std::env::remove_var("DATABASE_URL"),
+            }
+        }
     }
 
     fn clear_hardening_env() {

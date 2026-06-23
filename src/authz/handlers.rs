@@ -18,8 +18,8 @@ use crate::{
     models::{
         access::{
             AccessQuery, AdminPageQuery, AuditQuery, BulkAuthzRequest, BulkAuthzResponse,
-            BulkAuthzResult, EffectiveCapabilitiesQuery, ExpiringCredentialsQuery,
-            GroupAccessQuery, ResourceAccessQuery, RoleHoldersQuery, UnprotectedResourcesQuery,
+            BulkAuthzResult, ExpiringCredentialsQuery, GroupAccessQuery, ResourceAccessQuery,
+            RoleHoldersQuery, UnprotectedResourcesQuery,
         },
         capability::{CreateCapability, ListCapabilities},
         enums::{AuditOutcome, ScopeKind},
@@ -377,7 +377,7 @@ pub async fn get_capability(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let cap = repo::get_capability(&state.pool, id).await?;
     Ok(Json(cap))
 }
@@ -387,7 +387,7 @@ pub async fn list_capabilities(
     auth: AuthContext,
     Query(params): Query<ListCapabilities>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let caps = repo::list_capabilities(&state.pool, params).await?;
     Ok(Json(serde_json::json!({"items": caps})))
 }
@@ -433,7 +433,7 @@ pub async fn get_policy(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let policy = repo::get_policy(&state.pool, id).await?;
     Ok(Json(policy))
 }
@@ -443,7 +443,7 @@ pub async fn list_policies(
     auth: AuthContext,
     Query(params): Query<ListPolicies>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let list = repo::list_policies(&state.pool, params).await?;
     Ok(Json(list))
 }
@@ -652,20 +652,6 @@ pub async fn group_access(
     require_read_access(&state.pool, auth.entity_id, group.tenant_id, id).await?;
     let access = repo::group_access(&state.pool, id, params).await?;
     Ok(Json(access))
-}
-
-pub async fn effective_capabilities(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path(id): Path<Uuid>,
-    Query(params): Query<EffectiveCapabilitiesQuery>,
-) -> Result<impl IntoResponse, AppError> {
-    let entity = crate::identity::repo::get_entity(&state.pool, id).await?;
-    if auth.entity_id != id {
-        require_read_access(&state.pool, auth.entity_id, entity.tenant_id, id).await?;
-    }
-    let caps = repo::effective_capabilities(&state.pool, id, params).await?;
-    Ok(Json(caps))
 }
 
 pub async fn audit_logs(

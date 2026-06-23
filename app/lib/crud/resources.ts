@@ -16,6 +16,18 @@ import {
 
 export type CrudAction = "create" | "read" | "update" | "delete";
 
+export type CrudFilter = {
+  key: string;
+  variable?: string;
+  label: string;
+  allLabel?: string;
+  type: "text" | "select";
+  placeholder?: string;
+  options?: Array<{ label: string; value: string }>;
+  optionsQuery?: string;
+  optionsQueryName?: string;
+};
+
 export type CrudResource = {
   key: string;
   title: string;
@@ -29,14 +41,7 @@ export type CrudResource = {
   deleteIdField?: string;
   formAttributes?: boolean;
   tenantFilter?: boolean;
-  filters?: Array<{
-    key: string;
-    variable?: string;
-    label: string;
-    type: "text" | "select";
-    placeholder?: string;
-    options?: Array<{ label: string; value: string }>;
-  }>;
+  filters?: CrudFilter[];
   columns: Array<{
     key: string;
     label: string;
@@ -190,11 +195,22 @@ export const crudResources: CrudResource[] = [
     icon: Server,
     queryName: "resources",
     tenantFilter: true,
-    listQuery: `query Resources($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId attributes createdAt updatedAt } } }`,
+    listQuery: `query Resources($tenantId: ID, $kind: String, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, kind: $kind, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId attributes createdAt updatedAt } } }`,
     createMutation: `mutation CreateResource($input: CreateResourceInput!) { createResource(input: $input) { id kind name alias tenantId ownerId createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteResource($id: ID!) { deleteResource(id: $id) }`,
     deleteIdField: "id",
     formAttributes: true,
+    filters: [
+      {
+        key: "kind",
+        variable: "kind",
+        label: "Kind",
+        allLabel: "All Kinds",
+        type: "select",
+        optionsQuery: `query ResourceKinds($tenantId: ID) { resourceKinds(tenantId: $tenantId) }`,
+        optionsQueryName: "resourceKinds",
+      },
+    ],
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "alias", label: "Alias", priority: "medium" },
@@ -219,7 +235,7 @@ export const crudResources: CrudResource[] = [
     title: "Roles",
     route: "/roles",
     description:
-      "Rows from roles: named action sets assigned through policies/assignments.",
+      "Named collections of permission blocks assigned to entities or principal groups.",
     icon: ShieldCheck,
     queryName: "roles",
     tenantFilter: true,
@@ -287,7 +303,7 @@ export const crudResources: CrudResource[] = [
     },
   },
   {
-    key: "capability-actions",
+    key: "actions",
     title: "Actions",
     route: "/actions",
     description:
@@ -316,9 +332,9 @@ export const crudResources: CrudResource[] = [
     },
   },
   {
-    key: "capabilities",
+    key: "action-applicability",
     title: "Action Applicability",
-    route: "/actions",
+    route: "/actions/applicability",
     description:
       "Rows from action_applicability: each action/object-kind/object-type pair stored in Atom.",
     icon: KeyRound,
@@ -394,7 +410,7 @@ export const crudResources: CrudResource[] = [
   {
     key: "action-assignment-rules",
     title: "Assignment Guardrails",
-    route: "/actions",
+    route: "/actions/guardrails",
     description:
       "Rows from action_assignment_rules: assignment-time allow and deny guardrails by entity kind, action, and protected object.",
     icon: SlidersHorizontal,
@@ -572,7 +588,7 @@ export const secondaryResources: CrudResource[] = [
     title: "Relationships",
     route: "/entities",
     description:
-      "Ownerships, group memberships, role actions, and policy inheritance traces.",
+      "Ownerships, group memberships, role assignments, and policy inheritance traces.",
     icon: Network,
     queryName: "ownedEntities",
     columns: [

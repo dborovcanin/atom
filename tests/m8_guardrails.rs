@@ -304,3 +304,178 @@ async fn exact_object_permission_block_uses_real_object_type() {
         .to_string()
         .contains("capability publish is not applicable to resource:rule"));
 }
+
+/// Adding a capability to a role must be guardrail-checked against every entity
+/// that holds the role, including those reaching it through a *parent* group.
+///
+/// Regression for `validate_role_capability` expanding group membership
+/// recursively: before the fix it joined only direct members of the assigned
+/// group, so a device sitting in a child group of the assigned parent group was
+/// invisible and the prohibited capability was added anyway.
+#[tokio::test]
+#[ignore]
+async fn role_capability_addition_rejects_device_via_parent_group() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let device = tenant_entity(&p, tenant_id, "device").await;
+    let manage_id = capability_id(&p, "manage").await;
+
+    // An absolute deny for device `manage` at tenant scope — the scope a role
+    // assignment edge carries, which is what `validate_role_capability` reads.
+    sqlx::query(
+        "INSERT INTO action_assignment_rules
+            (entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+         VALUES ('device', 'manage', 'tenant', NULL, 'deny', TRUE)",
+    )
+    .execute(&p)
+    .await
+    .expect("insert custom rule");
+
+    let make_group = |name: String| {
+        atom::identity::repo::create_group(
+            &p,
+            CreateGroup {
+                id: None,
+                name,
+                tenant_id: Some(tenant_id),
+                group_type: Some("principal".to_string()),
+                description: None,
+                attributes: json!({}),
+            },
+        )
+    };
+    let parent = make_group(format!("m8-parent-{}", Uuid::new_v4()))
+        .await
+        .expect("parent group");
+    let child = make_group(format!("m8-child-{}", Uuid::new_v4()))
+        .await
+        .expect("child group");
+    atom::identity::repo::set_group_parent(&p, child.id, parent.id)
+        .await
+        .expect("set parent");
+    // Device joins the child group before the role carries the prohibited
+    // capability, so the join itself is clean.
+    atom::identity::repo::add_group_member(&p, child.id, device)
+        .await
+        .expect("device joins child group");
+
+    // An empty tenant role assigned to the parent group.
+    let role = atom::authz::repo::create_role(
+        &p,
+        CreateRole {
+            name: format!("m8-parent-role-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("role");
+    atom::authz::repo::create_role_assignment(
+        &p,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Group,
+            subject_id: parent.id,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect("assign role to parent group");
+
+    // Adding `manage` must be rejected: the device holds the role through the
+    // child→parent chain and is absolutely denied device `manage` at tenant scope.
+    let err = atom::authz::repo::add_role_capability(&p, role.id, manage_id)
+        .await
+        .expect_err("guardrail should reject capability addition for transitive device holder");
+    assert!(
+        err.to_string().contains("guardrail rejected"),
+        "expected guardrail rejection, got: {err}"
+    );
+}
+
+/// Two-connection race: a block-link mutation that adds a prohibited block to a
+/// role must serialize with a concurrent role assignment, so the combination
+/// guardrails forbid cannot slip through on stale state. Both mutators take a
+/// FOR UPDATE lock on the role; the assignment can only validate after the
+/// block link commits, and then it sees the prohibited block and is rejected.
+#[tokio::test]
+#[ignore]
+async fn concurrent_block_link_and_role_assignment_serialize() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let device = tenant_entity(&p, tenant_id, "device").await;
+    let manage = capability_id(&p, "manage").await;
+
+    let role = atom::authz::repo::create_role(
+        &p,
+        CreateRole {
+            name: format!("m8-race-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("create role");
+
+    // Connection A: hold the role lock and link a device-prohibited block
+    // (manage on resource) in an open transaction — an in-flight block-link
+    // mutation that has not committed yet.
+    let mut tx = p.begin().await.expect("begin tx");
+    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(role.id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("lock role");
+    let block: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_kind, tenant_id, effect)
+           VALUES ('object_kind', 'resource', $1, 'allow') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("insert block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(manage)
+    .execute(&mut *tx)
+    .await
+    .expect("block action");
+    sqlx::query(
+        "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+    )
+    .bind(role.id)
+    .bind(block)
+    .execute(&mut *tx)
+    .await
+    .expect("link block");
+
+    // Connection B: assign the role to the device. create_role_assignment locks
+    // the same role, so it blocks until A commits, then validates.
+    let p2 = p.clone();
+    let role_id = role.id;
+    let handle = tokio::spawn(async move {
+        atom::authz::repo::create_role_assignment(
+            &p2,
+            CreateRoleAssignment {
+                tenant_id: Some(tenant_id),
+                subject_kind: SubjectKind::Entity,
+                subject_id: device,
+                role_id,
+            },
+        )
+        .await
+    });
+
+    // Let B reach (and block on) the role lock, then commit the block link.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await.expect("commit block link");
+
+    let result = handle.await.expect("join assignment task");
+    let err = result.expect_err("assignment must be rejected once the prohibited block is linked");
+    assert!(
+        err.to_string().contains("guardrail rejected"),
+        "expected a guardrail rejection, got: {err}"
+    );
+}

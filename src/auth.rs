@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::{
     error::{db_err, AppError},
     keys::{ActiveKeys, LoadedKey},
-    models::enums::{CredentialKind, CredentialStatus, EntityStatus, TenantStatus},
+    models::enums::{
+        CredentialKind, CredentialStatus, Effect, EntityStatus, ScopeKind, TenantStatus,
+    },
     state::AppState,
 };
 
@@ -426,61 +428,157 @@ pub async fn has_capability_in_scope(
     capability_name: &str,
     scope: Scope,
 ) -> Result<bool, AppError> {
-    let (scope_clause, scope_ref): (&str, Option<String>) = match scope {
-        Scope::Platform => ("pb.scope_kind = 'platform'", None),
-        Scope::Tenant(t) => (
-            r#"(pb.scope_kind = 'platform'
-               OR (
-                   pb.scope_kind = 'tenant'
-                   AND pb.scope_ref = $3
-                   AND EXISTS (
-                       SELECT 1 FROM tenants tenant
-                       WHERE tenant.id = $3::uuid AND tenant.status = 'active'
-                   )
-               ))"#,
-            Some(t.to_string()),
-        ),
-        Scope::Object(id) => (
-            "(pb.scope_kind = 'platform' OR (pb.scope_kind = 'object' AND pb.scope_ref = $3))",
-            Some(id.to_string()),
-        ),
-    };
-
-    let sql = format!(
-        r#"SELECT EXISTS (
-            SELECT 1
-            FROM effective_access_edges() pb
-            JOIN entities actor ON actor.id = $1 AND actor.status = 'active'
-            LEFT JOIN tenants actor_tenant ON actor_tenant.id = actor.tenant_id
-            WHERE (
-                (pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                OR (pb.subject_kind = 'group' AND pb.subject_id IN (
-                    SELECT group_id FROM group_members WHERE entity_id = $1
-                ))
-            )
-            AND (actor.tenant_id IS NULL OR actor_tenant.status = 'active')
-            AND pb.effect = 'allow'
-            AND {scope_clause}
-            AND (
-                (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                    SELECT id FROM actions WHERE name = $2
-                ))
-                OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                    SELECT rc.role_id FROM effective_role_actions() rc
-                    JOIN actions c ON c.id = rc.capability_id
-                    WHERE c.name = $2
-                ))
-            )
-        )"#
-    );
-
-    let mut q = sqlx::query_scalar(&sql)
-        .bind(entity_id)
-        .bind(capability_name);
-    if let Some(scope_ref) = scope_ref {
-        q = q.bind(scope_ref);
+    if !actor_is_active(pool, entity_id).await? {
+        return Ok(false);
     }
-    q.fetch_one(pool).await.map_err(db_err)
+    if let Scope::Tenant(tenant_id) = scope {
+        if !tenant_is_active(pool, tenant_id).await? {
+            return Ok(false);
+        }
+    }
+    let Some(action_id) = action_id_by_name(pool, capability_name).await? else {
+        return Ok(false);
+    };
+    let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
+    let gate_tenant = gate_tenant_context(pool, scope).await?;
+    Ok(gate_action_allows(
+        &grants,
+        action_id,
+        &[(scope, gate_tenant)],
+    ))
+}
+
+/// The tenant whose objects the gate concerns, used to apply the same assignment
+/// tenant boundary the PDP enforces (`EffectiveGrant::tenant_boundary`). A
+/// platform gate has no tenant; a tenant gate is that tenant; an object gate is
+/// the object's owning tenant, resolved here exactly as the PDP resolves it.
+/// A missing object and a platform/global object both resolve to `None`.
+async fn gate_tenant_context(pool: &PgPool, scope: Scope) -> Result<Option<Uuid>, AppError> {
+    Ok(match scope {
+        Scope::Platform => None,
+        Scope::Tenant(tenant_id) => Some(tenant_id),
+        Scope::Object(object_id) => crate::authz::repo::object_tenant_id_by_id(pool, object_id)
+            .await?
+            .flatten(),
+    })
+}
+
+/// Coarse control-plane decision over the canonical grant expansion: does the
+/// subject hold an *unconditional* `allow` for `action_id` at one of `scopes`,
+/// not overridden by a deny? Group membership is already resolved recursively by
+/// the expansion, and role-linked blocks carry their own scope/effect.
+///
+/// **All `scopes` for the action are evaluated together.** A caller that accepts
+/// either an exact-object grant or a tenant-wide grant (e.g. `require_read_access`)
+/// passes both scopes here, so a deny at the narrower scope (an exact-object
+/// deny) overrides an allow at the broader one (a tenant-wide allow) — exactly as
+/// the PDP applies deny-override. Evaluating each scope independently and
+/// returning on the first allow would let a tenant allow bypass an object deny.
+///
+/// Gates **fail closed on ABAC conditions** because they run without request
+/// context, and several callers use the gate as the final authorization (e.g.
+/// `createEntity` has no object to re-check against the PDP):
+/// - only an *unconditional* allow satisfies the gate — a conditional allow
+///   cannot be verified here, so it does not grant the precondition (otherwise a
+///   `manage if context.mfa` grant would pass without MFA);
+/// - *any* matching deny blocks, conditional or not — a deny we cannot fully
+///   evaluate is assumed to apply.
+///
+/// Object-specific decisions must still call the PDP, which evaluates the
+/// conditions this gate deliberately ignores. The trade-off is that a subject
+/// whose only access is conditional will not pass a coarse gate; that is the
+/// safe direction for an administrative precondition.
+///
+/// Each scope carries its `gate_tenant` (see [`gate_tenant_context`]); a grant's
+/// assignment tenant boundary is applied against the scope it matches, just as
+/// the PDP does, so a platform- or object-scoped block reached through a
+/// tenant-bounded assignment cannot satisfy a gate for another tenant's object.
+/// A requested scope paired with the tenant whose objects it concerns (its
+/// [`gate_tenant_context`]), the unit `gate_action_allows` evaluates.
+type ScopeCheck = (Scope, Option<Uuid>);
+
+fn gate_action_allows(
+    grants: &[crate::authz::repo::EffectiveGrant],
+    action_id: Uuid,
+    scopes: &[ScopeCheck],
+) -> bool {
+    let mut allow = false;
+    for grant in grants {
+        if grant.capability_id != action_id {
+            continue;
+        }
+        // The grant applies if it matches any requested scope under that scope's
+        // assignment tenant boundary. A tenant-bounded grant only applies to that
+        // tenant's objects, matching the PDP.
+        let applies = scopes.iter().any(|(scope, gate_tenant)| {
+            gate_scope_satisfied(grant, *scope)
+                && grant
+                    .tenant_boundary
+                    .is_none_or(|boundary| Some(boundary) == *gate_tenant)
+        });
+        if !applies {
+            continue;
+        }
+        match grant.effect {
+            Effect::Deny => return false,
+            Effect::Allow if is_unconditional(&grant.conditions) => allow = true,
+            Effect::Allow => {}
+        }
+    }
+    allow
+}
+
+fn gate_scope_satisfied(grant: &crate::authz::repo::EffectiveGrant, scope: Scope) -> bool {
+    match scope {
+        Scope::Platform => grant.scope_kind == ScopeKind::Platform,
+        Scope::Tenant(tenant_id) => {
+            grant.scope_kind == ScopeKind::Platform
+                || (grant.scope_kind == ScopeKind::Tenant
+                    && grant.scope_ref.as_deref() == Some(tenant_id.to_string().as_str()))
+        }
+        Scope::Object(object_id) => {
+            grant.scope_kind == ScopeKind::Platform
+                || (grant.scope_kind == ScopeKind::Object
+                    && grant.scope_ref.as_deref() == Some(object_id.to_string().as_str()))
+        }
+    }
+}
+
+fn is_unconditional(conditions: &serde_json::Value) -> bool {
+    conditions.as_object().is_some_and(|map| map.is_empty())
+}
+
+async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
+    let active: Option<bool> = sqlx::query_scalar(
+        r#"SELECT (actor.status = 'active'
+                   AND (actor.tenant_id IS NULL OR actor_tenant.status = 'active'))
+           FROM entities actor
+           LEFT JOIN tenants actor_tenant ON actor_tenant.id = actor.tenant_id
+           WHERE actor.id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    Ok(active.unwrap_or(false))
+}
+
+async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppError> {
+    let active: Option<bool> =
+        sqlx::query_scalar("SELECT status = 'active' FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    Ok(active.unwrap_or(false))
+}
+
+async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, AppError> {
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err)
 }
 
 pub async fn has_capability_at_scope(
@@ -497,12 +595,92 @@ pub async fn require_any_capability(
     entity_id: Uuid,
     checks: &[(&str, Scope)],
 ) -> Result<(), AppError> {
+    if checks.is_empty() {
+        return Err(AppError::Forbidden);
+    }
+    if !actor_is_active(pool, entity_id).await? {
+        return Err(AppError::Forbidden);
+    }
+    // Load the subject's grants and resolve the candidate action names once,
+    // then evaluate the candidates in memory instead of firing one expansion
+    // query per candidate.
+    let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
+    let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
+    let action_ids = action_ids_by_name(pool, &names).await?;
+    let mut tenant_active: std::collections::HashMap<Uuid, bool> = std::collections::HashMap::new();
+    // Resolved owning tenant per object id, so a repeated object scope across the
+    // candidate list (e.g. read + manage on the same object) is looked up once.
+    let mut object_tenant: std::collections::HashMap<Uuid, Option<Uuid>> =
+        std::collections::HashMap::new();
+
+    // Group the requested scopes by action, preserving order, so each action is
+    // evaluated across all of its scopes together (cross-scope deny-override).
+    let mut by_action: Vec<(Uuid, Vec<ScopeCheck>)> = Vec::new();
     for (capability_name, scope) in checks {
-        if has_capability_in_scope(pool, entity_id, capability_name, *scope).await? {
+        let Some(&action_id) = action_ids.get(*capability_name) else {
+            continue;
+        };
+        if let Scope::Tenant(tenant_id) = scope {
+            let active = match tenant_active.get(tenant_id) {
+                Some(&active) => active,
+                None => {
+                    let active = tenant_is_active(pool, *tenant_id).await?;
+                    tenant_active.insert(*tenant_id, active);
+                    active
+                }
+            };
+            // An inactive tenant's scope cannot grant anything; drop it.
+            if !active {
+                continue;
+            }
+        }
+        let gate_tenant = match scope {
+            Scope::Platform => None,
+            Scope::Tenant(tenant_id) => Some(*tenant_id),
+            Scope::Object(object_id) => match object_tenant.get(object_id) {
+                Some(&tenant) => tenant,
+                None => {
+                    let tenant = gate_tenant_context(pool, *scope).await?;
+                    object_tenant.insert(*object_id, tenant);
+                    tenant
+                }
+            },
+        };
+        match by_action.iter_mut().find(|(id, _)| *id == action_id) {
+            Some((_, action_scopes)) => action_scopes.push((*scope, gate_tenant)),
+            None => by_action.push((action_id, vec![(*scope, gate_tenant)])),
+        }
+    }
+
+    // Any one action whose combined scopes yield an allow (not overridden by a
+    // deny at any of them) authorizes the request.
+    for (action_id, action_scopes) in &by_action {
+        if gate_action_allows(&grants, *action_id, action_scopes) {
             return Ok(());
         }
     }
     Err(AppError::Forbidden)
+}
+
+async fn action_ids_by_name(
+    pool: &PgPool,
+    names: &[&str],
+) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
+    use sqlx::Row;
+    let owned: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+    let rows = sqlx::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
+        .bind(&owned)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("name").map_err(db_err)?,
+                row.try_get::<Uuid, _>("id").map_err(db_err)?,
+            ))
+        })
+        .collect()
 }
 
 pub fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {
@@ -550,15 +728,18 @@ pub async fn require_role_read(
     require_any_capability(pool, entity_id, &[("role.manage", scope), ("read", scope)]).await
 }
 
-pub async fn require_policy_read(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
+/// Gate for reading policy records in a tenant (or platform when `tenant_id` is
+/// `None`): `policy.manage`, `read`, or `manage` at that scope.
+pub async fn require_policy_read(
+    pool: &PgPool,
+    entity_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let scope = scope_for_tenant(tenant_id);
     require_any_capability(
         pool,
         entity_id,
-        &[
-            ("policy.manage", Scope::Platform),
-            ("read", Scope::Platform),
-            ("manage", Scope::Platform),
-        ],
+        &[("policy.manage", scope), ("read", scope), ("manage", scope)],
     )
     .await
 }

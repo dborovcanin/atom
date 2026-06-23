@@ -288,68 +288,104 @@ pub async fn list_tenants_for_entity(
     let q = search_pattern(params.q);
     let access_actions = ["read", "manage"];
 
-    let items = sqlx::query_as::<_, Tenant>(&format!(
-        r#"SELECT {TENANT_COLS} FROM tenants t
-           WHERE ($2::text IS NULL OR t.name = $2)
+    // Visibility filter over the single canonical grant model, consistent with
+    // the PDP. A tenant is visible when, for SOME requested action (read or
+    // manage), the caller holds an unconditional allow that matches the tenant
+    // object — at platform, tenant=t, object_kind='tenant', object_type=
+    // 'tenant:tenant', or object=t scope — via a direct policy or a role-linked
+    // block carrying its real effect, and that same action is not denied.
+    // Deny-override is per-action (a manage deny does not hide a read-visible
+    // tenant); group membership is resolved recursively; the assignment tenant
+    // boundary is honoured.
+    const CTES: &str = r#"WITH RECURSIVE subject_groups(group_id) AS (
+            SELECT gm.group_id
+            FROM group_members gm
+            JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.group_type = 'principal'
+            WHERE gm.entity_id = $1
+            UNION ALL
+            SELECT gh.parent_id
+            FROM group_hierarchy gh
+            JOIN subject_groups sg ON sg.group_id = gh.child_id
+            JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.group_type = 'principal'
+        ),
+        role_grants AS (
+            SELECT rpb.role_id AS root_role_id,
+                   pb.scope_mode AS scope_kind,
+                   CASE pb.scope_mode
+                     WHEN 'platform' THEN NULL
+                     WHEN 'tenant' THEN pb.tenant_id::text
+                     WHEN 'object_kind' THEN pb.object_kind
+                     WHEN 'object_type' THEN pb.object_type
+                     WHEN 'object' THEN pb.object_id::text
+                     ELSE NULL
+                   END AS scope_ref,
+                   pba.action_id AS capability_id,
+                   pb.effect,
+                   pb.conditions
+            FROM role_permission_blocks rpb
+            JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+            JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+        )"#;
+    // Scopes the PDP matches for a tenant object `t`: platform, tenant=t,
+    // object_kind='tenant', object_type='tenant:tenant', and object=t.
+    const SCOPE_MATCH: &str = "(%P%.scope_kind = 'platform'
+        OR (%P%.scope_kind = 'tenant' AND %P%.scope_ref = t.id::text)
+        OR (%P%.scope_kind = 'object_kind' AND %P%.scope_ref = 'tenant')
+        OR (%P%.scope_kind = 'object_type' AND %P%.scope_ref = 'tenant:tenant')
+        OR (%P%.scope_kind = 'object' AND %P%.scope_ref = t.id::text))";
+    let edge_scope = SCOPE_MATCH.replace("%P%", "pb");
+    let role_scope = SCOPE_MATCH.replace("%P%", "rg");
+    let subject_match = r#"((pb.subject_kind = 'entity' AND pb.subject_id = $1)
+            OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+          AND (pb.tenant_id IS NULL OR pb.tenant_id = t.id)"#;
+    // Per-action allow/deny, correlated to action `a` so deny-override applies
+    // within an action only: a `manage` deny must not hide a tenant the caller
+    // can `read`. The tenant is visible when SOME requested action has an
+    // unconditional allow not overridden by a deny.
+    let allow_for_action = format!(
+        r#"EXISTS (
+            SELECT 1 FROM effective_access_edges() pb
+            WHERE {subject_match}
+              AND (
+                (pb.grant_kind = 'capability' AND pb.effect = 'allow' AND pb.conditions = '{{}}'::jsonb
+                  AND pb.grant_id = a.id AND {edge_scope})
+                OR (pb.grant_kind = 'role' AND EXISTS (
+                  SELECT 1 FROM role_grants rg
+                  WHERE rg.root_role_id = pb.grant_id AND rg.effect = 'allow' AND rg.conditions = '{{}}'::jsonb
+                    AND rg.capability_id = a.id AND {role_scope}))
+              )
+        )"#
+    );
+    let deny_for_action = format!(
+        r#"EXISTS (
+            SELECT 1 FROM effective_access_edges() pb
+            WHERE {subject_match}
+              AND (
+                (pb.grant_kind = 'capability' AND pb.effect = 'deny'
+                  AND pb.grant_id = a.id AND {edge_scope})
+                OR (pb.grant_kind = 'role' AND EXISTS (
+                  SELECT 1 FROM role_grants rg
+                  WHERE rg.root_role_id = pb.grant_id AND rg.effect = 'deny'
+                    AND rg.capability_id = a.id AND {role_scope}))
+              )
+        )"#
+    );
+    let auth_filter = format!(
+        r#"AND EXISTS (
+            SELECT 1 FROM actions a
+            WHERE a.name = ANY($6::text[])
+              AND {allow_for_action}
+              AND NOT {deny_for_action}
+        )"#
+    );
+    let base_filter = r#"($2::text IS NULL OR t.name = $2)
              AND ($3::text IS NULL OR lower(t.alias) = lower($3))
              AND ($4::text IS NULL OR t.status = $4)
-             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
-             AND EXISTS (
-                 SELECT 1
-                 FROM effective_access_edges() pb
-                 WHERE (
-                     (pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                     OR (pb.subject_kind = 'group' AND pb.subject_id IN (
-                         SELECT group_id FROM group_members WHERE entity_id = $1
-                     ))
-                 )
-                 AND pb.effect = 'allow'
-                 AND (
-                     pb.scope_kind = 'platform'
-                     OR (pb.scope_kind = 'tenant' AND pb.scope_ref = t.id::text)
-                 )
-                 AND (
-                     (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM actions
-                         WHERE name = ANY($6::text[])
-                     ))
-                     OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                         SELECT rc.role_id
-                         FROM effective_role_actions() rc
-                         JOIN actions c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[])
-                     ))
-                 )
-             )
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM effective_access_edges() pb
-                 WHERE (
-                     (pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                     OR (pb.subject_kind = 'group' AND pb.subject_id IN (
-                         SELECT group_id FROM group_members WHERE entity_id = $1
-                     ))
-                 )
-                 AND pb.effect = 'deny'
-                 AND (
-                     pb.scope_kind = 'platform'
-                     OR (pb.scope_kind = 'tenant' AND pb.scope_ref = t.id::text)
-                 )
-                 AND (
-                     (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM actions
-                         WHERE name = ANY($6::text[])
-                     ))
-                     OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                         SELECT rc.role_id
-                         FROM effective_role_actions() rc
-                         JOIN actions c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[])
-                     ))
-                 )
-             )
-           ORDER BY t.created_at DESC
-           LIMIT $7 OFFSET $8"#,
+             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)"#;
+
+    let items = sqlx::query_as::<_, Tenant>(&format!(
+        "{CTES} SELECT {TENANT_COLS} FROM tenants t \
+         WHERE {base_filter} {auth_filter} ORDER BY t.created_at DESC LIMIT $7 OFFSET $8"
     ))
     .bind(entity_id)
     .bind(name.clone())
@@ -363,67 +399,9 @@ pub async fn list_tenants_for_entity(
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM tenants t
-           WHERE ($2::text IS NULL OR t.name = $2)
-             AND ($3::text IS NULL OR lower(t.alias) = lower($3))
-             AND ($4::text IS NULL OR t.status = $4)
-             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
-             AND EXISTS (
-                 SELECT 1
-                 FROM effective_access_edges() pb
-                 WHERE (
-                     (pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                     OR (pb.subject_kind = 'group' AND pb.subject_id IN (
-                         SELECT group_id FROM group_members WHERE entity_id = $1
-                     ))
-                 )
-                 AND pb.effect = 'allow'
-                 AND (
-                     pb.scope_kind = 'platform'
-                     OR (pb.scope_kind = 'tenant' AND pb.scope_ref = t.id::text)
-                 )
-                 AND (
-                     (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM actions
-                         WHERE name = ANY($6::text[])
-                     ))
-                     OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                         SELECT rc.role_id
-                         FROM effective_role_actions() rc
-                         JOIN actions c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[])
-                     ))
-                 )
-             )
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM effective_access_edges() pb
-                 WHERE (
-                     (pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                     OR (pb.subject_kind = 'group' AND pb.subject_id IN (
-                         SELECT group_id FROM group_members WHERE entity_id = $1
-                     ))
-                 )
-                 AND pb.effect = 'deny'
-                 AND (
-                     pb.scope_kind = 'platform'
-                     OR (pb.scope_kind = 'tenant' AND pb.scope_ref = t.id::text)
-                 )
-                 AND (
-                     (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                         SELECT id FROM actions
-                         WHERE name = ANY($6::text[])
-                     ))
-                     OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                         SELECT rc.role_id
-                         FROM effective_role_actions() rc
-                         JOIN actions c ON c.id = rc.capability_id
-                         WHERE c.name = ANY($6::text[])
-                     ))
-                 )
-             )"#,
-    )
+    let total: i64 = sqlx::query_scalar(&format!(
+        "{CTES} SELECT COUNT(*) FROM tenants t WHERE {base_filter} {auth_filter}"
+    ))
     .bind(entity_id)
     .bind(name)
     .bind(alias)

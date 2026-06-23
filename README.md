@@ -475,7 +475,7 @@ Generic application mapping:
 | `ATOM_HTTP_RATE_LIMIT_ADMIN_ROUTES` / `ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS` | `300` / `60` | Authenticated REST admin route rate-limit policy |
 | `ATOM_AUTH_BODY_LIMIT_BYTES` / `ATOM_GRAPHQL_BODY_LIMIT_BYTES` / `ATOM_CUSTOM_ENDPOINT_BODY_LIMIT_BYTES` | `32768` / `1048576` / `1048576` | Request body limits |
 | `ATOM_GRAPHQL_MAX_DEPTH` / `ATOM_GRAPHQL_MAX_COMPLEXITY` | `20` / `1000` | GraphQL validation limits |
-| `ATOM_GRAPHQL_INTROSPECTION_ENABLED` | `true` | Enables GraphQL introspection |
+| `ATOM_GRAPHQL_INTROSPECTION_ENABLED` | `false` | Enables GraphQL introspection (off by default; opt in for dev) |
 | `JWT_EXPIRY_SECS` | `3600` | JWT lifetime in seconds |
 | `ATOM_JWT_ISSUER` | `ATOM_PUBLIC_BASE_URL` | JWT issuer claim |
 | `ATOM_JWT_AUDIENCE` | `magistrala` | JWT audience claim |
@@ -854,6 +854,13 @@ cargo watch -x run
 
 # Run Postgres only for cargo run
 docker compose --env-file .env up -d postgres
+
+# Run unit tests without external services
+cargo test
+
+# Run DB-gated integration tests, including #[ignore] tests
+set -a; source .env; set +a
+cargo test -- --include-ignored --test-threads=1
 
 # Lint
 cargo clippy -- -D warnings

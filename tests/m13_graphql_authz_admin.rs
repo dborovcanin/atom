@@ -405,7 +405,7 @@ async fn create_role_and_attach_capability() {
         .execute(authed(format!(
             r#"
             {{
-              roles {{
+              roles(q: "{name}") {{
                 items {{ id name derivedKind }}
               }}
               role(id: "{role_id}") {{ id name }}
@@ -876,4 +876,191 @@ async fn audit_and_admin_queries_smoke() {
     assert!(data["orphanPolicies"].is_array());
     assert!(data["unprotectedResources"].is_array());
     assert!(data["expiringCredentials"].is_array());
+}
+
+/// Through an actual GraphQL resolver, an exact-object read deny must override a
+/// tenant-wide read allow. The `entity(id)` resolver falls back to the
+/// control-plane gate when the PDP denies, so the gate must apply cross-scope
+/// deny-override (the GraphQL gate previously used a sequential-OR copy that let
+/// the tenant allow win).
+#[tokio::test]
+#[ignore]
+async fn graphql_entity_read_object_deny_overrides_tenant_allow() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+    let subject = tenant_entity(&pool, tenant_id, "human").await;
+    let target = tenant_entity(&pool, tenant_id, "human").await;
+    let read = seeded_action(&pool, "read").await;
+
+    // Tenant-wide read allow + exact-object read deny on the target, both to the subject.
+    let allow_block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions) VALUES ('tenant', $1, 'allow', '{}') RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("allow block");
+    let deny_block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions) VALUES ('object', $1, 'deny', '{}') RETURNING id",
+    )
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("deny block");
+    for block in [allow_block, deny_block] {
+        sqlx::query(
+            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        )
+        .bind(block)
+        .bind(read)
+        .execute(&pool)
+        .await
+        .expect("block action");
+        sqlx::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+            .bind(tenant_id)
+            .bind(subject)
+            .bind(block)
+            .execute(&pool)
+            .await
+            .expect("direct policy");
+    }
+
+    let schema = build_schema(state(pool.clone()));
+    let resp = schema
+        .execute(authed_as(
+            subject,
+            format!("{{ entity(id: \"{target}\") {{ id }} }}"),
+        ))
+        .await;
+    assert!(
+        !resp.errors.is_empty(),
+        "object read deny must override tenant read allow through the GraphQL gate, got: {:?}",
+        resp.data
+    );
+}
+
+/// manage implies read, evaluated through the PDP (not the old coarse gate
+/// fallback). A caller with an object_type-scoped `manage` allow — a scope the
+/// gate fallback did not match — can now read the entity.
+#[tokio::test]
+#[ignore]
+async fn graphql_entity_read_allowed_via_object_type_manage() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+    let subject = tenant_entity(&pool, tenant_id, "human").await;
+    let target = tenant_entity(&pool, tenant_id, "human").await;
+    let manage = seeded_action(&pool, "manage").await;
+
+    let block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, object_kind, object_type, tenant_id, effect, conditions) VALUES ('object_type', 'entity', 'entity:human', $1, 'allow', '{}') RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("manage block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(manage)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+        .bind(tenant_id)
+        .bind(subject)
+        .bind(block)
+        .execute(&pool)
+        .await
+        .expect("direct policy");
+
+    let schema = build_schema(state(pool.clone()));
+    let resp = schema
+        .execute(authed_as(
+            subject,
+            format!("{{ entity(id: \"{target}\") {{ id }} }}"),
+        ))
+        .await;
+    assert!(
+        resp.errors.is_empty(),
+        "object_type manage must grant read through the PDP: {:?}",
+        resp.errors
+    );
+    let data = resp.data.into_json().expect("json");
+    assert_eq!(data["entity"]["id"], serde_json::json!(target.to_string()));
+}
+
+/// A tenant visible through an object-kind scoped tenant grant must also be
+/// readable through `tenant(id)`. Listing already accepted this grant shape;
+/// the point lookup used the coarser control-plane gate and rejected it.
+#[tokio::test]
+#[ignore]
+async fn graphql_tenant_read_matches_listing_object_kind_grant() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+    let subject = tenant_entity(&pool, tenant_id, "human").await;
+    let read = seeded_action(&pool, "read").await;
+
+    let block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks
+           (scope_mode, tenant_id, object_kind, effect, conditions)
+         VALUES ('object_kind', $1, 'tenant', 'allow', '{}')
+         RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("tenant object-kind read block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(read)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query(
+        "INSERT INTO direct_policies
+           (tenant_id, subject_kind, subject_id, permission_block_id)
+         VALUES ($1, 'entity', $2, $3)",
+    )
+    .bind(tenant_id)
+    .bind(subject)
+    .bind(block)
+    .execute(&pool)
+    .await
+    .expect("direct policy");
+
+    let schema = build_schema(state(pool.clone()));
+    let listed = schema
+        .execute(authed_as(subject, "{ tenants { items { id } total } }"))
+        .await;
+    assert!(
+        listed.errors.is_empty(),
+        "tenant list should accept object-kind tenant grants: {:?}",
+        listed.errors
+    );
+    let listed_data = listed.data.into_json().expect("json");
+    assert!(listed_data["tenants"]["items"]
+        .as_array()
+        .expect("tenant items")
+        .iter()
+        .any(|item| item["id"] == serde_json::json!(tenant_id.to_string())));
+
+    let fetched = schema
+        .execute(authed_as(
+            subject,
+            format!("{{ tenant(id: \"{tenant_id}\") {{ id }} }}"),
+        ))
+        .await;
+    assert!(
+        fetched.errors.is_empty(),
+        "tenant(id) should use the same object-level PDP semantics as listing: {:?}",
+        fetched.errors
+    );
+    let fetched_data = fetched.data.into_json().expect("json");
+    assert_eq!(
+        fetched_data["tenant"]["id"],
+        serde_json::json!(tenant_id.to_string())
+    );
 }
