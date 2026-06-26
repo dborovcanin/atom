@@ -114,8 +114,10 @@ impl AuthzService for AtomAuthz {
             .await
             .map_err(Status::from)?;
         let (target_kind, target_id) = authz_request_target(&authz_req);
-        audit::write(
+        audit::write_hot_path(
             &self.state.pool,
+            self.state.config.audit_policy,
+            audit::HotPathAuditKind::AuthzCheck,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -230,8 +232,10 @@ impl AuthService for AtomAuth {
         };
         let entity_id = result.as_ref().ok().map(|auth| auth.entity_id);
         let credential_id = result.as_ref().ok().map(|auth| auth.credential_id);
-        audit::write(
+        audit::write_hot_path(
             &self.state.pool,
+            self.state.config.audit_policy,
+            audit::HotPathAuditKind::AuthCredentialAuthenticate,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,

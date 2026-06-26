@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     authz::{access, engine, repo as authz_repo},
+    config::AuditPolicyConfig,
     models::{
         access::{self as access_model, AuthorizedObjectIdsQuery},
         enums::AuditOutcome,
@@ -83,7 +84,15 @@ impl AuthzMutation {
         let response = engine::evaluate(&state.pool, &req)
             .await
             .map_err(gql_error)?;
-        audit_authz_check(&state.pool, auth.entity_id, &req, &response, tenant_id).await;
+        audit_authz_check(
+            &state.pool,
+            state.config.audit_policy,
+            auth.entity_id,
+            &req,
+            &response,
+            tenant_id,
+        )
+        .await;
         Ok(response.into())
     }
 
@@ -130,7 +139,15 @@ impl AuthzMutation {
             let response = engine::evaluate(&state.pool, &req)
                 .await
                 .map_err(gql_error)?;
-            audit_authz_check(&state.pool, auth.entity_id, &req, &response, tenant_id).await;
+            audit_authz_check(
+                &state.pool,
+                state.config.audit_policy,
+                auth.entity_id,
+                &req,
+                &response,
+                tenant_id,
+            )
+            .await;
             responses.push(response.into());
         }
         Ok(responses)
@@ -157,6 +174,7 @@ fn authz_request_target(req: &AuthzRequest) -> (Option<&str>, Option<Uuid>) {
 
 async fn audit_authz_check(
     pool: &sqlx::PgPool,
+    audit_policy: AuditPolicyConfig,
     actor_id: Uuid,
     req: &AuthzRequest,
     response: &ModelAuthzResponse,
@@ -183,8 +201,10 @@ async fn audit_authz_check(
     }
 
     let (target_kind, target_id) = authz_request_target(req);
-    audit::write(
+    audit::write_hot_path(
         pool,
+        audit_policy,
+        audit::HotPathAuditKind::AuthzCheck,
         audit::AuditEvent {
             actor_entity_id: Some(actor_id),
             tenant_id,

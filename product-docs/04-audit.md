@@ -8,6 +8,8 @@
 
 Atom writes audit log entries for authorization checks, logins, logouts, and credential operations. But there is **no endpoint to read them**. The data is captured and trapped in the database.
 
+Successful high-volume `authz.check`, `auth.login`, and gRPC credential-authentication allow events are metrics/traces by default rather than durable DB rows. Operators can opt in to durable allow rows with `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true`; deny/error audit events, explicit explain/debug actions, admin mutations, lifecycle changes, and credential changes remain durable DB audit.
+
 Operators need to:
 - Debug why a specific entity was denied access in the last hour.
 - Review all authorization decisions for a resource during an incident.
@@ -106,9 +108,9 @@ GET /entities/:id/audit
 
 | Event | When it's written | Details contain |
 |---|---|---|
-| `authz.check` | Every `POST /authz/check` call | `action`, `resource_id`, `reason` |
+| `authz.check` | Authorization check decision; successful allows require `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` | `action`, `resource_id`, `reason` |
 | `authz.explain` | Every `POST /authz/explain` call | `action`, `resource_id`, `reason` |
-| `auth.login` | Successful or failed login | `credential_kind`, `session_id` (if successful) |
+| `auth.login` | Login decision; successful allows require `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` | `credential_kind`, `session_id` (if successful) |
 | `auth.logout` | Session revocation via logout | `session_id` |
 | `credential.create` | Password or API key created | `credential_id`, `credential_kind` |
 | `credential.revoke` | Credential revoked | `credential_id`, `credential_kind` |
@@ -123,7 +125,7 @@ GET /entities/:id/audit
 GET /audit?entity_id=bbb&event=authz.check&outcome=deny&from=2026-04-24T09:30:00Z
 ```
 
-### 2. "Show all login activity today"
+### 2. "Show failed login activity today, plus successful logins when hot-path allow DB audit is enabled"
 
 ```
 GET /audit?event=auth.login&from=2026-04-24T00:00:00Z

@@ -119,8 +119,10 @@ pub async fn login_password_with_tenant(
         Err(_) => return result,
     };
 
-    audit::write(
+    audit::write_hot_path(
         pool,
+        cfg.audit_policy,
+        audit::HotPathAuditKind::AuthLogin,
         audit::AuditEvent {
             actor_entity_id: entity_id_opt,
             tenant_id: tenant_id_opt,
@@ -901,13 +903,34 @@ async fn resolve_login_identity(
 
     let row = login_entity_row(pool, identifier, tenant_id).await?;
     use sqlx::Row;
+    let entity_id = row.try_get("id").map_err(db_err)?;
     Ok(LoginIdentity {
-        entity_id: row.try_get("id").map_err(db_err)?,
+        entity_id,
         tenant_id: row.try_get("tenant_id").unwrap_or(None),
         status: row.try_get("status").map_err(db_err)?,
-        email_verified: None,
+        email_verified: entity_email_verified(pool, entity_id).await?,
         credential_identifier: None,
     })
+}
+
+async fn entity_email_verified(pool: &PgPool, entity_id: Uuid) -> Result<Option<bool>, AppError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"SELECT COUNT(*) AS email_count,
+                  COALESCE(bool_or(verified_at IS NOT NULL), false) AS any_verified
+           FROM entity_emails
+           WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    let email_count: i64 = row.try_get("email_count").map_err(db_err)?;
+    if email_count == 0 {
+        return Ok(None);
+    }
+    row.try_get("any_verified").map(Some).map_err(db_err)
 }
 
 async fn login_identity_by_email(
@@ -952,7 +975,7 @@ async fn password_credential_for_login(
            WHERE entity_id = $1
              AND kind = $2
              AND status = $3
-             AND (($4::text IS NULL AND identifier IS NULL) OR identifier = $4)
+             AND ($4::text IS NULL OR identifier = $4)
            ORDER BY created_at DESC
            LIMIT 1"#,
     )

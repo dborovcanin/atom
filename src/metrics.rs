@@ -1,10 +1,10 @@
 //! Metrics façade.
 //!
 //! The rest of the codebase only ever calls the semantic functions here
-//! (`record_decision`, `record_audit_failure`, `record_rate_limit_rejection`)
-//! and never imports the `metrics` crate directly. The backend (the `metrics`
-//! facade + Prometheus exporter) is confined to this file and gated behind the
-//! `metrics` cargo feature, so:
+//! (`record_decision`, `record_audit_failure`, `record_audit_db_suppressed`,
+//! `record_rate_limit_rejection`) and never imports the `metrics` crate
+//! directly. The backend (the `metrics` facade + Prometheus exporter) is
+//! confined to this file and gated behind the `metrics` cargo feature, so:
 //!
 //! - `--no-default-features` → every function below compiles to an inlined
 //!   no-op and the metrics crates are not linked (true zero cost).
@@ -22,6 +22,8 @@ use std::time::Duration;
 pub const DECISION_DURATION: &str = "atom_authz_decision_duration_seconds";
 /// Counter of audit-log writes that failed and were dropped.
 pub const AUDIT_WRITE_FAILURES: &str = "atom_audit_write_failures_total";
+/// Counter of hot-path audit events intentionally kept out of `audit_logs`.
+pub const AUDIT_DB_SUPPRESSED: &str = "atom_audit_db_suppressed_total";
 /// Counter of rate-limiter rejections, labelled by `category`.
 pub const RATE_LIMIT_REJECTIONS: &str = "atom_rate_limit_rejections_total";
 /// Gauge of DB pool connections, labelled by `state` (total|idle).
@@ -77,6 +79,10 @@ mod backend {
         metrics::counter!(AUDIT_WRITE_FAILURES).increment(1);
     }
 
+    pub fn record_audit_db_suppressed(category: &'static str) {
+        metrics::counter!(AUDIT_DB_SUPPRESSED, "category" => category).increment(1);
+    }
+
     pub fn record_rate_limit_rejection(category: &'static str) {
         metrics::counter!(RATE_LIMIT_REJECTIONS, "category" => category).increment(1);
     }
@@ -101,9 +107,12 @@ mod backend {
     #[inline]
     pub fn record_audit_failure() {}
     #[inline]
+    pub fn record_audit_db_suppressed(_category: &'static str) {}
+    #[inline]
     pub fn record_rate_limit_rejection(_category: &'static str) {}
 }
 
 pub use backend::{
-    enabled, init, record_audit_failure, record_decision, record_rate_limit_rejection, render,
+    enabled, init, record_audit_db_suppressed, record_audit_failure, record_decision,
+    record_rate_limit_rejection, render,
 };

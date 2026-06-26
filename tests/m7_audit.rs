@@ -1,4 +1,4 @@
-//! M7 integration tests — audit tenanting and login event.
+//! M7 integration tests — audit tenanting and hot-path persistence policy.
 //!
 //! Run with:
 //! ```bash
@@ -9,9 +9,7 @@ mod common;
 
 use atom::{
     audit,
-    config::Config,
-    identity::service,
-    keys,
+    config::AuditPolicyConfig,
     models::{
         access::AuditQuery,
         enums::{AuditOutcome, Effect, GrantKind, ScopeKind, SubjectKind},
@@ -174,35 +172,91 @@ async fn tenant_audit_filter_returns_only_allowed_tenant_rows() {
 
 #[tokio::test]
 #[ignore]
-async fn successful_login_emits_auth_login_allow_with_actor_and_target() {
+async fn hot_path_allow_skips_db_audit_by_default() {
     let p = pool().await;
-    let cfg = Config::for_tests();
-    keys::bootstrap_if_needed(&p, &cfg.signing_keys)
-        .await
-        .expect("bootstrap keys");
-    let keys = keys::load_active_keys(&p, &cfg.signing_keys)
-        .await
-        .expect("load keys");
     let entity_id = human(&p, None).await;
-    service::create_password(&p, entity_id, "test-password-123")
-        .await
-        .expect("password");
 
-    let cfg = Config {
-        admin_entity_id: entity_id,
-        ..cfg
-    };
-
-    let resp = service::login_password(
+    audit::write_hot_path(
         &p,
-        &cfg,
-        &keys.primary,
-        &format!("m7-human-{entity_id}"),
-        "test-password-123",
+        AuditPolicyConfig::default(),
+        audit::HotPathAuditKind::AuthLogin,
+        audit::AuditEvent {
+            actor_entity_id: Some(entity_id),
+            tenant_id: None,
+            target_kind: Some("entity"),
+            target_id: Some(entity_id),
+            event: "auth.login",
+            outcome: AuditOutcome::Allow,
+            details: json!({"identifier": format!("m7-human-{entity_id}")}),
+        },
     )
+    .await;
+
+    let details: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(entity_id)
+    .fetch_optional(&p)
     .await
-    .expect("login");
-    assert_eq!(resp.entity_id, entity_id);
+    .expect("login audit lookup");
+    assert!(details.is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn hot_path_deny_keeps_db_audit_by_default() {
+    let p = pool().await;
+    let entity_id = human(&p, None).await;
+
+    audit::write_hot_path(
+        &p,
+        AuditPolicyConfig::default(),
+        audit::HotPathAuditKind::AuthzCheck,
+        audit::AuditEvent {
+            actor_entity_id: Some(entity_id),
+            tenant_id: None,
+            target_kind: Some("resource"),
+            target_id: None,
+            event: "authz.check",
+            outcome: AuditOutcome::Deny,
+            details: json!({"action": "publish", "reason": "no matching allow policy"}),
+        },
+    )
+    .await;
+
+    let details: serde_json::Value = sqlx::query_scalar(
+        "SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'resource' AND event = 'authz.check' AND outcome = 'deny' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(entity_id)
+    .fetch_one(&p)
+    .await
+    .expect("deny audit");
+    assert_eq!(details["reason"], json!("no matching allow policy"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn hot_path_allow_db_audit_can_be_enabled() {
+    let p = pool().await;
+    let entity_id = human(&p, None).await;
+
+    audit::write_hot_path(
+        &p,
+        AuditPolicyConfig {
+            hot_path_allow_db_enabled: true,
+        },
+        audit::HotPathAuditKind::AuthLogin,
+        audit::AuditEvent {
+            actor_entity_id: Some(entity_id),
+            tenant_id: None,
+            target_kind: Some("entity"),
+            target_id: Some(entity_id),
+            event: "auth.login",
+            outcome: AuditOutcome::Allow,
+            details: json!({"identifier": format!("m7-human-{entity_id}")}),
+        },
+    )
+    .await;
 
     let details: serde_json::Value = sqlx::query_scalar(
         "SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",

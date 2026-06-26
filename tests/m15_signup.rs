@@ -111,6 +111,16 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     .await;
     assert!(strict_login.is_err());
 
+    let strict_name_login = service::login_password(
+        &pool,
+        &config(false),
+        &keys.primary,
+        &name,
+        "test-password-123",
+    )
+    .await;
+    assert!(strict_name_login.is_err());
+
     let login = service::login_password(
         &pool,
         &config(true),
@@ -123,6 +133,19 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(login.entity_id, response.entity_id);
     assert_eq!(login.email_verified, Some(false));
     assert!(login.verification_required);
+
+    let name_login = service::login_password(
+        &pool,
+        &config(true),
+        &keys.primary,
+        &name,
+        "test-password-123",
+    )
+    .await
+    .expect("dev login by account name");
+    assert_eq!(name_login.entity_id, response.entity_id);
+    assert_eq!(name_login.email_verified, Some(false));
+    assert!(name_login.verification_required);
 
     sqlx::query("UPDATE entities SET status = 'suspended' WHERE id = $1")
         .bind(response.entity_id)

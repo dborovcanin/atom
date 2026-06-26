@@ -3,7 +3,11 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{config::AuditRetentionConfig, models::enums::AuditOutcome, state::AppState};
+use crate::{
+    config::{AuditPolicyConfig, AuditRetentionConfig},
+    models::enums::AuditOutcome,
+    state::AppState,
+};
 
 #[derive(Debug, Clone)]
 pub struct AuditCleanupSummary {
@@ -19,6 +23,46 @@ pub struct AuditEvent<'a> {
     pub event: &'a str,
     pub outcome: AuditOutcome,
     pub details: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotPathAuditKind {
+    AuthzCheck,
+    AuthLogin,
+    AuthCredentialAuthenticate,
+}
+
+impl HotPathAuditKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthzCheck => "authz_check",
+            Self::AuthLogin => "auth_login",
+            Self::AuthCredentialAuthenticate => "auth_credential_authenticate",
+        }
+    }
+}
+
+fn should_write_hot_path_allow(policy: AuditPolicyConfig) -> bool {
+    policy.hot_path_allow_db_enabled
+}
+
+pub async fn write_hot_path(
+    pool: &PgPool,
+    policy: AuditPolicyConfig,
+    kind: HotPathAuditKind,
+    event: AuditEvent<'_>,
+) {
+    if matches!(event.outcome, AuditOutcome::Allow) && !should_write_hot_path_allow(policy) {
+        crate::metrics::record_audit_db_suppressed(kind.as_str());
+        tracing::trace!(
+            audit_event = event.event,
+            audit_category = kind.as_str(),
+            "audit DB write suppressed by policy"
+        );
+        return;
+    }
+
+    write(pool, event).await;
 }
 
 pub async fn write(pool: &PgPool, event: AuditEvent<'_>) {
@@ -120,4 +164,22 @@ pub async fn cleanup_expired(
         deleted_rows,
         cutoff,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_write_hot_path_allow;
+    use crate::config::AuditPolicyConfig;
+
+    #[test]
+    fn hot_path_allow_persistence_defaults_off() {
+        assert!(!should_write_hot_path_allow(AuditPolicyConfig::default()));
+    }
+
+    #[test]
+    fn hot_path_allow_persistence_can_be_enabled() {
+        assert!(should_write_hot_path_allow(AuditPolicyConfig {
+            hot_path_allow_db_enabled: true,
+        }));
+    }
 }

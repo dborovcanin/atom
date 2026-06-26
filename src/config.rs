@@ -21,6 +21,7 @@ pub struct Config {
     /// must then be secured by the deployment: private network / service mesh).
     pub grpc_tls: Option<GrpcTlsConfig>,
     pub signing_keys: SigningKeyConfig,
+    pub audit_policy: AuditPolicyConfig,
     pub audit_retention: AuditRetentionConfig,
     pub purge: PurgeConfig,
     pub rate_limits: RateLimitConfig,
@@ -128,6 +129,16 @@ impl Default for SigningKeyConfig {
             allow_plaintext_signing_keys: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuditPolicyConfig {
+    /// Persist successful high-volume auth/authz events to `audit_logs`.
+    ///
+    /// Disabled by default: allow volume is better handled by metrics/traces in
+    /// production. Denies/errors, explicit explain/debug actions, and admin or
+    /// lifecycle mutations still use durable DB audit.
+    pub hot_path_allow_db_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +329,12 @@ impl Config {
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
             signing_keys: signing_keys_from_env()?,
+            audit_policy: AuditPolicyConfig {
+                hot_path_allow_db_enabled: env_bool_default(
+                    "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
+                    AuditPolicyConfig::default().hot_path_allow_db_enabled,
+                ),
+            },
             audit_retention: audit_retention_from_env()?,
             purge: purge_from_env()?,
             rate_limits: rate_limits_from_env()?,
@@ -401,6 +418,7 @@ impl Config {
                 allow_plaintext_signing_keys: true,
                 ..SigningKeyConfig::default()
             },
+            audit_policy: AuditPolicyConfig::default(),
             audit_retention: AuditRetentionConfig::default(),
             purge: PurgeConfig::default(),
             rate_limits: RateLimitConfig {
@@ -856,6 +874,7 @@ mod tests {
         assert_eq!(cfg.db_pool.acquire_timeout_secs, 30);
         assert!(!cfg.signing_keys.allow_plaintext_signing_keys);
         assert!(cfg.signing_keys.key_encryption_key.is_none());
+        assert!(!cfg.audit_policy.hot_path_allow_db_enabled);
         assert_eq!(cfg.audit_retention.days, 365);
         assert_eq!(cfg.login_failure_limit, 5);
         assert_eq!(cfg.login_failure_window_secs, 900);
@@ -892,6 +911,19 @@ mod tests {
 
         let cfg = Config::from_env().expect("config");
         assert!(cfg.graphql_limits.introspection_enabled);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn hot_path_allow_db_audit_opts_in_via_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED", "true");
+
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.audit_policy.hot_path_allow_db_enabled);
 
         clear_hardening_env();
     }
@@ -968,6 +1000,7 @@ mod tests {
             "ATOM_KEY_ENCRYPTION_KEY",
             "ATOM_KEY_ENCRYPTION_KEY_ID",
             "ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS",
+            "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
             "ATOM_AUDIT_RETENTION_DAYS",
             "ATOM_AUDIT_RETENTION_ENABLED",
             "ATOM_AUDIT_CLEANUP_INTERVAL_SECS",

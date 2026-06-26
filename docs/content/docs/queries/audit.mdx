@@ -7,6 +7,8 @@ description: Query the audit log for authorization decisions and identity events
 
 Reads audit log entries that Atom writes for authorization checks, logins, logouts, lifecycle changes, and credential operations.
 
+Successful high-volume `authz.check`, `auth.login`, and gRPC credential-authentication allow events are not written to `audit_logs` by default. Atom counts them in metrics and emits traces instead. Set `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` to persist those allow events too. Deny/error audit events, explicit `authz.explain` calls, admin mutations, lifecycle events, and credential changes remain durable DB audit.
+
 ## Arguments
 
 | Parameter | Type | Default | Description |
@@ -61,9 +63,9 @@ Reads audit log entries that Atom writes for authorization checks, logins, logou
 
 | Event | When it's written | Details contain |
 |---|---|---|
-| `authz.check` | Authorization check decision | `action`, `resource_id`, `reason` |
+| `authz.check` | Authorization check decision; successful allows require `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` | `action`, `resource_id`, `reason` |
 | `authz.explain` | Authorization explanation decision | `action`, `resource_id`, `reason` |
-| `auth.login` | Successful or failed login | `identifier` |
+| `auth.login` | Login decision; successful allows require `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` | `identifier` |
 | `auth.logout` | Session revocation | `{}` |
 | `entity.update` / `entity.enable` / `entity.disable` / `entity.delete` / `entity.restore` / `entity.purge` | Entity lifecycle changes | changed fields or status where relevant |
 | `resource.update` / `resource.delete` / `resource.restore` / `resource.purge` | Resource lifecycle changes | changed fields where relevant |
@@ -75,7 +77,7 @@ Reads audit log entries that Atom writes for authorization checks, logins, logou
 | Query | Endpoint |
 |---|---|
 | Why was channel-01 denied in the last hour? | `auditLogs(targetKind: "resource", targetId: "...", event: "authz.check", outcome: deny, from: "2026-04-24T09:30:00Z")` |
-| All login activity today | `auditLogs(event: "auth.login", from: "2026-04-24T00:00:00Z")` |
+| Failed login activity today, plus successful logins when hot-path allow DB audit is enabled | `auditLogs(event: "auth.login", from: "2026-04-24T00:00:00Z")` |
 | All audit events for Alice | `entityAuditLogs(entityId: "...")` |
 | All failed authorization checks | `auditLogs(event: "authz.check", outcome: deny, limit: 100)` |
 

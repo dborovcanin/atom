@@ -290,6 +290,14 @@ backend and compiles metric calls to no-ops, use:
 cargo build --release --no-default-features
 ```
 
+Successful high-volume authorization/authentication allow events are kept out
+of the DB audit log by default and counted by
+`atom_audit_db_suppressed_total{category=...}` instead. Set
+`ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` when a deployment needs those allow
+decisions in durable audit rows. Deny/error audit events, explicit
+explain/debug actions, admin mutations, lifecycle events, and credential
+changes remain durable DB audit.
+
 `/metrics` is intentionally unauthenticated and exposes internal operational
 data. Restrict it to the Prometheus scraper with a firewall, private network,
 reverse proxy, or service-mesh policy; do not expose it publicly.
@@ -572,6 +580,7 @@ Generic application mapping:
 | `ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS`                                                                                            | `false`                                              | Development-only fallback for plaintext signing key rows                                |
 | `ATOM_AUDIT_RETENTION_DAYS` / `ATOM_AUDIT_RETENTION_ENABLED`                                                                   | `365` / `true`                                       | Background audit cleanup policy                                                         |
 | `ATOM_AUDIT_CLEANUP_INTERVAL_SECS` / `ATOM_AUDIT_CLEANUP_BATCH_SIZE`                                                           | `86400` / `5000`                                     | Audit cleanup cadence and batch size                                                    |
+| `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED`                                                                                         | `false`                                              | Persist successful high-volume authz/auth allow events to `audit_logs`                  |
 | `ATOM_LOGIN_FAILURE_LIMIT` / `ATOM_LOGIN_FAILURE_WINDOW_SECS`                                                                  | `5` / `900`                                          | Password login throttle                                                                 |
 | `ATOM_RATE_LIMIT_ENABLED`                                                                                                      | `true`                                               | Enables in-process HTTP rate limits                                                     |
 | `ATOM_TRUSTED_PROXY_CIDRS`                                                                                                     | *(empty)*                                            | Comma-separated proxy CIDRs whose forwarded client IP headers Atom may trust            |
