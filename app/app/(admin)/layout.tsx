@@ -32,7 +32,11 @@ export default async function AdminLayout({
   }
 
   return (
-    <AppShell entityName={profile.name} entityKind={profile.kind}>
+    <AppShell
+      entityName={profile.name}
+      entityKind={profile.kind}
+      sessionExpiresAt={session.expiresAt}
+    >
       {children}
     </AppShell>
   );

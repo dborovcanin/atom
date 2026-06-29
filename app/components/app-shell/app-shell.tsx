@@ -19,6 +19,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type * as React from "react";
 import { Fragment } from "react";
+import { SessionRefresh } from "@/components/app-shell/session-refresh";
 import {
   TenantProvider,
   useTenant,
@@ -101,13 +102,16 @@ export function AppShell({
   children,
   entityName,
   entityKind,
+  sessionExpiresAt,
 }: {
   children: React.ReactNode;
   entityName: string;
   entityKind?: string;
+  sessionExpiresAt: string;
 }) {
   return (
     <TenantProvider>
+      <SessionRefresh expiresAt={sessionExpiresAt} />
       <SidebarProvider>
         <AppSidebar entityName={entityName} entityKind={entityKind} />
         <SidebarInset>

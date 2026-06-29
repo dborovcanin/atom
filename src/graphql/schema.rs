@@ -228,6 +228,7 @@ mod tests {
         for name in [
             "login",
             "logout",
+            "refreshSession",
             "signup",
             "createTenant",
             "updateTenant",

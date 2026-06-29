@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { AUTH_COOKIE, AUTH_META_COOKIE } from "@/lib/auth/session";
+import { setAuthCookies } from "@/lib/auth/session";
 import { getGraphqlEndpoint } from "@/lib/graphql/client";
 import { withForwardedClientIpHeaders } from "@/lib/http/client-ip-headers";
 
@@ -43,35 +43,12 @@ export async function POST(request: Request) {
   }
 
   const login = payload.data.login;
-  const secure = process.env.NODE_ENV === "production";
   const res = NextResponse.json({
     entityId: login.entityId,
     sessionId: login.sessionId,
     expiresAt: login.expiresAt,
   });
-
-  res.cookies.set(AUTH_COOKIE, login.token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure,
-    path: "/",
-    expires: new Date(login.expiresAt),
-  });
-  res.cookies.set(
-    AUTH_META_COOKIE,
-    JSON.stringify({
-      entityId: login.entityId,
-      sessionId: login.sessionId,
-      expiresAt: login.expiresAt,
-    }),
-    {
-      httpOnly: true,
-      sameSite: "lax",
-      secure,
-      path: "/",
-      expires: new Date(login.expiresAt),
-    },
-  );
+  setAuthCookies(res, login);
 
   return res;
 }

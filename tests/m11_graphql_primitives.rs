@@ -12,7 +12,7 @@ use atom::{
     auth::AuthContext,
     config::Config,
     graphql::build_schema,
-    identity::{profile_repo, service},
+    identity::{profile_repo, repo, service},
     keys,
     models::{
         profile::{CreateProfile, CreateProfileVersion},
@@ -154,6 +154,88 @@ async fn login_mutation_returns_token() {
         .is_some_and(|token| !token.is_empty()));
     assert!(login["sessionId"].as_str().is_some());
     assert!(login["expiresAt"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn refresh_session_mutation_extends_current_session() {
+    let pool = common::pool().await;
+    let (entity_id, _) = create_human(&pool).await;
+    let session = repo::create_session(&pool, entity_id, 60)
+        .await
+        .expect("create session");
+    let schema = build_schema(state(pool.clone()).await);
+
+    let response = schema
+        .execute(
+            Request::new(
+                r#"
+                mutation {
+                  refreshSession {
+                    token
+                    entityId
+                    sessionId
+                    expiresAt
+                  }
+                }
+                "#,
+            )
+            .data(AuthContext {
+                entity_id,
+                tenant_id: None,
+                session_id: Some(session.id),
+            }),
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let refresh = &response.data.into_json().expect("json data")["refreshSession"];
+    assert_eq!(refresh["entityId"], entity_id.to_string());
+    assert_eq!(refresh["sessionId"], session.id.to_string());
+    assert!(refresh["token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
+    assert!(refresh["expiresAt"].as_str().is_some());
+
+    let refreshed_expires_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
+            .bind(session.id)
+            .fetch_one(&pool)
+            .await
+            .expect("refreshed session expiry");
+    assert!(refreshed_expires_at > session.expires_at);
+}
+
+#[tokio::test]
+#[ignore]
+async fn refresh_session_mutation_requires_session_token() {
+    let pool = common::pool().await;
+    let (entity_id, _) = create_human(&pool).await;
+    let schema = build_schema(state(pool).await);
+
+    let response = schema
+        .execute(
+            Request::new(
+                r#"
+                mutation {
+                  refreshSession {
+                    token
+                  }
+                }
+                "#,
+            )
+            .data(AuthContext {
+                entity_id,
+                tenant_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+
+    assert!(response.errors.iter().any(|err| {
+        err.message
+            .contains("session refresh requires a session token")
+    }));
 }
 
 #[tokio::test]

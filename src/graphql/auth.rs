@@ -111,6 +111,28 @@ impl AuthMutation {
 
         Ok(true)
     }
+
+    async fn refresh_session(&self, ctx: &Context<'_>) -> Result<LoginResponse> {
+        let auth = require_auth(ctx)?;
+        let session_id = auth.session_id.ok_or_else(|| {
+            gql_error(AppError::unauthorized(
+                "session refresh requires a session token",
+            ))
+        })?;
+        let state = ctx.data::<AppState>()?;
+        let keys = state.keys.read().await;
+
+        service::refresh_session(
+            &state.pool,
+            &state.config,
+            &keys.primary,
+            auth.entity_id,
+            session_id,
+        )
+        .await
+        .map(Into::into)
+        .map_err(gql_error)
+    }
 }
 
 pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {

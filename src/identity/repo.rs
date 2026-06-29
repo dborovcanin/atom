@@ -817,6 +817,32 @@ pub(crate) async fn create_session_in_tx(
     .map_err(db_err)
 }
 
+pub(crate) async fn refresh_session_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    entity_id: Uuid,
+    expiry_secs: u64,
+) -> Result<Session, AppError> {
+    let expires_at: DateTime<Utc> = Utc::now() + Duration::seconds(expiry_secs as i64);
+
+    sqlx::query_as::<_, Session>(
+        r#"UPDATE sessions
+           SET expires_at = $3
+           WHERE id = $1
+             AND entity_id = $2
+             AND revoked_at IS NULL
+             AND expires_at > now()
+           RETURNING id, entity_id, expires_at, revoked_at, created_at"#,
+    )
+    .bind(id)
+    .bind(entity_id)
+    .bind(expires_at)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .ok_or_else(|| AppError::unauthorized("session is not refreshable"))
+}
+
 pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Session, AppError> {
     sqlx::query_as::<_, Session>(
         "SELECT id, entity_id, expires_at, revoked_at, created_at FROM sessions WHERE id = $1",

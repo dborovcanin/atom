@@ -843,6 +843,42 @@ pub async fn oauth_exchange(
     create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await
 }
 
+pub async fn refresh_session(
+    pool: &PgPool,
+    cfg: &Config,
+    primary_key: &LoadedKey,
+    entity_id: Uuid,
+    session_id: Uuid,
+) -> Result<LoginResponse, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let Some((_, tenant_id)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
+        return Err(AppError::unauthorized("entity is not active"));
+    };
+
+    let session =
+        super::repo::refresh_session_in_tx(&mut tx, session_id, entity_id, cfg.jwt_expiry_secs)
+            .await?;
+    let token = encode_jwt(
+        entity_id,
+        session.id,
+        tenant_id,
+        primary_key,
+        cfg.jwt_expiry_secs,
+        &cfg.jwt_issuer,
+        &cfg.jwt_audience,
+    )?;
+    tx.commit().await.map_err(db_err)?;
+
+    Ok(LoginResponse {
+        token,
+        entity_id,
+        session_id: session.id,
+        expires_at: session.expires_at,
+        email_verified: None,
+        verification_required: false,
+    })
+}
+
 async fn create_login_response(
     pool: &PgPool,
     cfg: &Config,
