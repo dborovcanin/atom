@@ -1761,7 +1761,7 @@ pub async fn create_password(
     pool: &PgPool,
     entity_id: Uuid,
     password: &str,
-) -> Result<(), AppError> {
+) -> Result<Uuid, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let Some((kind, _)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
         return Err(AppError::not_found(format!(
@@ -1783,7 +1783,7 @@ pub async fn create_password(
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
-    Ok(())
+    Ok(id)
 }
 
 fn validate_password_for_kind(kind: &EntityKind, password: &str) -> Result<(), AppError> {

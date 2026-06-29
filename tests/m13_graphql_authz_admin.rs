@@ -920,6 +920,69 @@ async fn audit_and_admin_queries_smoke() {
 
 #[tokio::test]
 #[ignore]
+async fn entity_create_is_the_entity_targeted_audit_event_when_password_is_created() {
+    let pool = common::pool().await;
+    let schema = build_schema(state(pool.clone()));
+    let entity_id = Uuid::new_v4();
+    let name = format!("audit-created-entity-{entity_id}");
+
+    let created = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createEntity(input: {{
+                id: "{entity_id}",
+                kind: human,
+                name: "{name}"
+              }}) {{
+                id
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+
+    let password = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createPassword(entityId: "{entity_id}", password: "test-password-123")
+            }}
+            "#
+        )))
+        .await;
+    assert!(password.errors.is_empty(), "{:?}", password.errors);
+
+    let queried = schema
+        .execute(authed(format!(
+            r#"
+            {{
+              auditLogs(targetKind: "entity", targetId: "{entity_id}", limit: 10) {{
+                items {{ event targetKind targetId }}
+                total
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(queried.errors.is_empty(), "{:?}", queried.errors);
+    let data = queried.data.into_json().expect("json data");
+    let items = data["auditLogs"]["items"].as_array().expect("items");
+    assert!(
+        items.iter().any(|item| item["event"] == "entity.create"),
+        "entity.create must be stored for the entity target: {items:?}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["event"] == "credential.create"),
+        "credential.create should target the credential object, not the entity: {items:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn entity_and_resource_lifecycle_mutations_write_audit_events() {
     let pool = common::pool().await;
     let device_id = entity(&pool, "device").await;

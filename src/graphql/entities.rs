@@ -198,45 +198,65 @@ impl EntityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", scope_for_tenant(tenant_id)),
-                ("write", scope_for_tenant(tenant_id)),
-            ],
-        )
-        .await?;
-
-        let result = repo::create_entity(
-            &state.pool,
-            entity_model::CreateEntity {
-                id: parse_optional_id(input.id, "id")?,
-                kind: parse_optional_entity_kind(input.kind),
-                profile_id: parse_optional_id(input.profile_id, "profileId")?,
-                profile_version_id: parse_optional_id(
-                    input.profile_version_id,
-                    "profileVersionId",
-                )?,
-                name: input.name,
-                alias: input.alias,
-                tenant_id,
-                attributes: input.attributes,
-            },
-        )
+        let id = parse_optional_id(input.id, "id")?;
+        let profile_id = parse_optional_id(input.profile_id, "profileId")?;
+        let profile_version_id = parse_optional_id(input.profile_version_id, "profileVersionId")?;
+        let kind = parse_optional_entity_kind(input.kind);
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", scope_for_tenant(tenant_id)),
+                    ("write", scope_for_tenant(tenant_id)),
+                ],
+            )
+            .await?;
+            repo::create_entity(
+                &state.pool,
+                entity_model::CreateEntity {
+                    id,
+                    kind,
+                    profile_id,
+                    profile_version_id,
+                    name: input.name,
+                    alias: input.alias,
+                    tenant_id,
+                    attributes: input.attributes,
+                },
+            )
+            .await
+        }
         .await;
 
-        audit::observe_result(
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "entity",
-                target_id: result.as_ref().ok().map(|e| e.id),
-                event: "entity.create",
-            },
-            serde_json::json!({}),
-            &result,
-        );
+        match &result {
+            Ok(entity) => {
+                audit::write(
+                    &state.pool,
+                    audit::AuditEvent {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id: entity.tenant_id,
+                        target_kind: Some("entity"),
+                        target_id: Some(entity.id),
+                        event: "entity.create",
+                        outcome: AuditOutcome::Allow,
+                        details: serde_json::json!({}),
+                    },
+                )
+                .await;
+            }
+            Err(_) => audit::observe_result(
+                audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: "entity",
+                    target_id: None,
+                    event: "entity.create",
+                },
+                serde_json::json!({}),
+                &result,
+            ),
+        }
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -403,30 +423,38 @@ impl EntityMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let group_id = parse_id(group_id, "groupId")?;
-        let entity = repo::get_entity(&state.pool, entity_id)
-            .await
-            .map_err(gql_error)?;
-        let group = repo::get_group(&state.pool, group_id)
-            .await
-            .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", Scope::Object(entity_id)),
-                ("write", Scope::Object(entity_id)),
-                ("write", Scope::Object(group_id)),
-                ("manage", scope_for_tenant(entity.tenant_id)),
-                ("write", scope_for_tenant(entity.tenant_id)),
-                ("manage", scope_for_tenant(group.tenant_id)),
-                ("write", scope_for_tenant(group.tenant_id)),
-            ],
-        )
-        .await?;
-        repo::set_entity_parent_group(&state.pool, entity_id, group_id)
-            .await
-            .map(Entity::from)
-            .map_err(gql_error)
+        let result = async {
+            let entity = repo::get_entity(&state.pool, entity_id).await?;
+            let group = repo::get_group(&state.pool, group_id).await?;
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", Scope::Object(entity_id)),
+                    ("write", Scope::Object(entity_id)),
+                    ("write", Scope::Object(group_id)),
+                    ("manage", scope_for_tenant(entity.tenant_id)),
+                    ("write", scope_for_tenant(entity.tenant_id)),
+                    ("manage", scope_for_tenant(group.tenant_id)),
+                    ("write", scope_for_tenant(group.tenant_id)),
+                ],
+            )
+            .await?;
+            repo::set_entity_parent_group(&state.pool, entity_id, group_id).await
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                target_kind: "entity",
+                target_id: Some(entity_id),
+                event: "entity.parent_group.set",
+            },
+            serde_json::json!({ "group_id": group_id }),
+            &result,
+        );
+        result.map(Entity::from).map_err(gql_error)
     }
 
     async fn add_entity_to_object_group(
@@ -443,24 +471,34 @@ impl EntityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let entity = repo::get_entity(&state.pool, entity_id)
-            .await
-            .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", Scope::Object(entity_id)),
-                ("write", Scope::Object(entity_id)),
-                ("manage", scope_for_tenant(entity.tenant_id)),
-                ("write", scope_for_tenant(entity.tenant_id)),
-            ],
-        )
-        .await?;
-        repo::clear_entity_parent_group(&state.pool, entity_id)
-            .await
-            .map(Entity::from)
-            .map_err(gql_error)
+        let result = async {
+            let entity = repo::get_entity(&state.pool, entity_id).await?;
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", Scope::Object(entity_id)),
+                    ("write", Scope::Object(entity_id)),
+                    ("manage", scope_for_tenant(entity.tenant_id)),
+                    ("write", scope_for_tenant(entity.tenant_id)),
+                ],
+            )
+            .await?;
+            repo::clear_entity_parent_group(&state.pool, entity_id).await
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                target_kind: "entity",
+                target_id: Some(entity_id),
+                event: "entity.parent_group.clear",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+        result.map(Entity::from).map_err(gql_error)
     }
 
     async fn remove_entity_from_object_group(

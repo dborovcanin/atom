@@ -505,17 +505,20 @@ pub async fn create_password(
         .get("password")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("missing 'password' field"))?;
-    service::create_password(&state.pool, entity_id, password).await?;
+    let credential_id = service::create_password(&state.pool, entity_id, password).await?;
     audit::write(
         &state.pool,
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id,
-            target_kind: Some("entity"),
-            target_id: Some(entity_id),
+            target_kind: Some("credential"),
+            target_id: Some(credential_id),
             event: "credential.create",
             outcome: AuditOutcome::Allow,
-            details: serde_json::json!({"kind": "password"}),
+            details: serde_json::json!({
+                "entity_id": entity_id,
+                "kind": "password",
+            }),
         },
     )
     .await;
@@ -535,11 +538,12 @@ pub async fn create_api_key(
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id,
-            target_kind: Some("entity"),
-            target_id: Some(entity_id),
+            target_kind: Some("credential"),
+            target_id: Some(resp.credential_id),
             event: "credential.create",
             outcome: AuditOutcome::Allow,
             details: serde_json::json!({
+                "entity_id": entity_id,
                 "kind": "api_key",
                 "credential_id": resp.credential_id
             }),

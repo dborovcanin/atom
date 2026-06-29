@@ -204,29 +204,49 @@ impl ApiEndpointMutation {
     async fn enable_api_endpoint(&self, ctx: &Context<'_>, id: ID) -> Result<ApiEndpoint> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
-        let endpoint = api_endpoint_repo::enable_api_endpoint(
-            &state.pool,
-            parse_id(id, "id")?,
-            Some(auth.entity_id),
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(endpoint.into())
+        let endpoint_id = parse_id(id, "id")?;
+        let result = async {
+            require_platform_manage_app(state, auth.entity_id).await?;
+            api_endpoint_repo::enable_api_endpoint(&state.pool, endpoint_id, Some(auth.entity_id))
+                .await
+        }
+        .await;
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                target_kind: "api_endpoint",
+                target_id: Some(endpoint_id),
+                event: "api_endpoint.enable",
+            },
+            json!({}),
+            &result,
+        );
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn disable_api_endpoint(&self, ctx: &Context<'_>, id: ID) -> Result<ApiEndpoint> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
-        let endpoint = api_endpoint_repo::disable_api_endpoint(
-            &state.pool,
-            parse_id(id, "id")?,
-            Some(auth.entity_id),
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(endpoint.into())
+        let endpoint_id = parse_id(id, "id")?;
+        let result = async {
+            require_platform_manage_app(state, auth.entity_id).await?;
+            api_endpoint_repo::disable_api_endpoint(&state.pool, endpoint_id, Some(auth.entity_id))
+                .await
+        }
+        .await;
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                target_kind: "api_endpoint",
+                target_id: Some(endpoint_id),
+                event: "api_endpoint.disable",
+            },
+            json!({}),
+            &result,
+        );
+        result.map(Into::into).map_err(gql_error)
     }
 }
 
@@ -240,9 +260,7 @@ async fn require_platform_manage_app(
     state: &AppState,
     entity_id: uuid::Uuid,
 ) -> std::result::Result<(), AppError> {
-    if has_global_manage(&state.pool, entity_id)
-        .await?
-    {
+    if has_global_manage(&state.pool, entity_id).await? {
         Ok(())
     } else {
         Err(AppError::Forbidden)

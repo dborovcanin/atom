@@ -270,24 +270,27 @@ impl TenantMutation {
     async fn create_tenant(&self, ctx: &Context<'_>, input: CreateTenantInput) -> Result<Tenant> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[("manage", Scope::Platform), ("create", Scope::Platform)],
-        )
-        .await?;
-
-        let result = tenant_repo::create_tenant(
-            &state.pool,
-            tenant_model::CreateTenant {
-                id: parse_optional_id(input.id, "id")?,
-                name: input.name,
-                alias: input.alias,
-                tags: input.tags.unwrap_or_default(),
-                attributes: input.attributes.unwrap_or(serde_json::Value::Null),
-            },
-            Some(auth.entity_id),
-        )
+        let id = parse_optional_id(input.id, "id")?;
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[("manage", Scope::Platform), ("create", Scope::Platform)],
+            )
+            .await?;
+            tenant_repo::create_tenant(
+                &state.pool,
+                tenant_model::CreateTenant {
+                    id,
+                    name: input.name,
+                    alias: input.alias,
+                    tags: input.tags.unwrap_or_default(),
+                    attributes: input.attributes.unwrap_or(serde_json::Value::Null),
+                },
+                Some(auth.entity_id),
+            )
+            .await
+        }
         .await;
 
         let tenant_id = result.as_ref().ok().map(|t| t.id);
@@ -315,27 +318,29 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(id, "id")?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", Scope::Platform),
-                ("manage", Scope::Tenant(tenant_id)),
-            ],
-        )
-        .await?;
-
-        let result = tenant_repo::update_tenant(
-            &state.pool,
-            tenant_id,
-            tenant_model::UpdateTenant {
-                name: input.name,
-                alias: input.alias.into(),
-                tags: input.tags,
-                attributes: input.attributes,
-            },
-            Some(auth.entity_id),
-        )
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", Scope::Platform),
+                    ("manage", Scope::Tenant(tenant_id)),
+                ],
+            )
+            .await?;
+            tenant_repo::update_tenant(
+                &state.pool,
+                tenant_id,
+                tenant_model::UpdateTenant {
+                    name: input.name,
+                    alias: input.alias.into(),
+                    tags: input.tags,
+                    attributes: input.attributes,
+                },
+                Some(auth.entity_id),
+            )
+            .await
+        }
         .await;
 
         audit::observe_result(
@@ -356,13 +361,13 @@ impl TenantMutation {
     async fn delete_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
-            .await
-            .map_err(gql_error)?;
-
         let tenant_id = parse_id(id, "id")?;
-        let result =
-            tenant_repo::soft_delete_tenant(&state.pool, tenant_id, Some(auth.entity_id)).await;
+        let result = async {
+            crate::auth::require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+                .await?;
+            tenant_repo::soft_delete_tenant(&state.pool, tenant_id, Some(auth.entity_id)).await
+        }
+        .await;
 
         audit::observe_result(
             audit::AuditMeta {
@@ -582,18 +587,30 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_capability(
-            &state.pool,
-            auth.entity_id,
-            "policy.manage",
-            Scope::Tenant(tenant_id),
-        )
-        .await
-        .map_err(gql_error)?;
-        tenant_repo::remove_tenant_member(&state.pool, tenant_id, parse_id(entity_id, "entityId")?)
-            .await
-            .map_err(gql_error)?;
-        Ok(true)
+        let entity_id = parse_id(entity_id, "entityId")?;
+        let result = async {
+            crate::auth::require_capability(
+                &state.pool,
+                auth.entity_id,
+                "policy.manage",
+                Scope::Tenant(tenant_id),
+            )
+            .await?;
+            tenant_repo::remove_tenant_member(&state.pool, tenant_id, entity_id).await
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: Some(tenant_id),
+                target_kind: "tenant",
+                target_id: Some(tenant_id),
+                event: "tenant_member.remove",
+            },
+            serde_json::json!({ "entity_id": entity_id }),
+            &result,
+        );
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn add_tenant_member(
@@ -606,43 +623,68 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_capability(
-            &state.pool,
-            auth.entity_id,
-            "policy.manage",
-            Scope::Tenant(tenant_id),
-        )
-        .await
-        .map_err(gql_error)?;
-        tenant_repo::add_tenant_member(
-            &state.pool,
-            tenant_id,
-            parse_id(entity_id, "entityId")?,
-            role_id.map(|id| parse_id(id, "roleId")).transpose()?,
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(true)
+        let entity_id = parse_id(entity_id, "entityId")?;
+        let role_id = role_id.map(|id| parse_id(id, "roleId")).transpose()?;
+        let result = async {
+            crate::auth::require_capability(
+                &state.pool,
+                auth.entity_id,
+                "policy.manage",
+                Scope::Tenant(tenant_id),
+            )
+            .await?;
+            tenant_repo::add_tenant_member(&state.pool, tenant_id, entity_id, role_id).await
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: Some(tenant_id),
+                target_kind: "tenant",
+                target_id: Some(tenant_id),
+                event: "tenant_member.add",
+            },
+            serde_json::json!({ "entity_id": entity_id, "role_id": role_id }),
+            &result,
+        );
+        result.map(|_| true).map_err(gql_error)
     }
 }
 
 async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -> Result<Tenant> {
     let auth = require_auth(ctx)?;
     let state = ctx.data::<AppState>()?;
-    require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
-        .await
-        .map_err(gql_error)?;
+    let tenant_id = parse_id(id, "id")?;
+    let event = tenant_status_event(&status);
+    let status_detail = status.clone();
+    let result = async {
+        crate::auth::require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+            .await?;
+        tenant_repo::change_tenant_status(&state.pool, tenant_id, status, Some(auth.entity_id))
+            .await
+    }
+    .await;
+    audit::observe_result(
+        audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: Some(tenant_id),
+            target_kind: "tenant",
+            target_id: Some(tenant_id),
+            event,
+        },
+        serde_json::json!({ "status": status_detail }),
+        &result,
+    );
+    result.map(Into::into).map_err(gql_error)
+}
 
-    let tenant = tenant_repo::change_tenant_status(
-        &state.pool,
-        parse_id(id, "id")?,
-        status,
-        Some(auth.entity_id),
-    )
-    .await
-    .map_err(gql_error)?;
-
-    Ok(tenant.into())
+fn tenant_status_event(status: &TenantStatus) -> &'static str {
+    match status {
+        TenantStatus::Active => "tenant.enable",
+        TenantStatus::Inactive => "tenant.disable",
+        TenantStatus::Frozen => "tenant.freeze",
+        TenantStatus::Deleted => "tenant.delete",
+    }
 }
 
 async fn require_tenant_read_access(

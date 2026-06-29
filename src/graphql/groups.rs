@@ -4,6 +4,7 @@ use crate::{
     audit,
     auth::Scope,
     authz::{engine, repo as authz_repo},
+    error::AppError,
     identity::repo,
     models::{
         access::AuthorizedObjectIdsQuery,
@@ -286,28 +287,31 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", scope_for_tenant(tenant_id)),
-                ("write", scope_for_tenant(tenant_id)),
-            ],
-        )
-        .await?;
-
         let group_type = input.group_type.clone();
-        let result = repo::create_group(
-            &state.pool,
-            CreateGroup {
-                id: parse_optional_id(input.id, "id")?,
-                name: input.name,
-                tenant_id,
-                group_type: input.group_type,
-                description: input.description,
-                attributes: input.attributes.unwrap_or(serde_json::Value::Null),
-            },
-        )
+        let id = parse_optional_id(input.id, "id")?;
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", scope_for_tenant(tenant_id)),
+                    ("write", scope_for_tenant(tenant_id)),
+                ],
+            )
+            .await?;
+            repo::create_group(
+                &state.pool,
+                CreateGroup {
+                    id,
+                    name: input.name,
+                    tenant_id,
+                    group_type: input.group_type,
+                    description: input.description,
+                    attributes: input.attributes.unwrap_or(serde_json::Value::Null),
+                },
+            )
+            .await
+        }
         .await;
 
         audit::observe_result(
@@ -352,23 +356,26 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, existing.tenant_id).await?;
-        let result = repo::update_group(
-            &state.pool,
-            id,
-            UpdateGroup {
-                name: input.name,
-                description: input.description,
-                status: input.status.map(Into::into),
-                attributes: input.attributes,
-            },
-        )
+        let result = async {
+            let existing = repo::get_group(&state.pool, id).await?;
+            require_group_manage_app(&state.pool, auth.entity_id, id, existing.tenant_id).await?;
+            repo::update_group(
+                &state.pool,
+                id,
+                UpdateGroup {
+                    name: input.name,
+                    description: input.description,
+                    status: input.status.map(Into::into),
+                    attributes: input.attributes,
+                },
+            )
+            .await
+        }
         .await;
         audit::observe_result(
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: existing.tenant_id,
+                tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
                 target_kind: "group",
                 target_id: Some(id),
                 event: "group.update",
@@ -399,12 +406,24 @@ impl GroupMutation {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         let parent_id = parse_id(parent_id, "parentId")?;
-        let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, group.tenant_id).await?;
-        let group = repo::set_group_parent(&state.pool, id, parent_id)
-            .await
-            .map_err(gql_error)?;
-        Ok(group.into())
+        let result = async {
+            let group = repo::get_group(&state.pool, id).await?;
+            require_group_manage_app(&state.pool, auth.entity_id, id, group.tenant_id).await?;
+            repo::set_group_parent(&state.pool, id, parent_id).await
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
+                target_kind: "group",
+                target_id: Some(id),
+                event: "group.parent.set",
+            },
+            serde_json::json!({ "parent_id": parent_id }),
+            &result,
+        );
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn set_object_group_parent(
@@ -421,12 +440,26 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, group.tenant_id).await?;
-        repo::remove_group_parent(&state.pool, id)
-            .await
-            .map_err(gql_error)?;
-        Ok(true)
+        let result = async {
+            let group = repo::get_group(&state.pool, id).await?;
+            let tenant_id = group.tenant_id;
+            require_group_manage_app(&state.pool, auth.entity_id, id, tenant_id).await?;
+            repo::remove_group_parent(&state.pool, id).await?;
+            Ok(tenant_id)
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().copied().flatten(),
+                target_kind: "group",
+                target_id: Some(id),
+                event: "group.parent.remove",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn remove_object_group_parent(
@@ -441,13 +474,18 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, existing.tenant_id).await?;
-        let result = repo::delete_group(&state.pool, id, Some(auth.entity_id)).await;
+        let result = async {
+            let existing = repo::get_group(&state.pool, id).await?;
+            let tenant_id = existing.tenant_id;
+            require_group_manage_app(&state.pool, auth.entity_id, id, tenant_id).await?;
+            repo::delete_group(&state.pool, id, Some(auth.entity_id)).await?;
+            Ok(tenant_id)
+        }
+        .await;
         audit::observe_result(
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: existing.tenant_id,
+                tenant_id: result.as_ref().ok().copied().flatten(),
                 target_kind: "group",
                 target_id: Some(id),
                 event: "group.delete",
@@ -522,22 +560,34 @@ impl GroupMutation {
         let state = ctx.data::<AppState>()?;
         let group_id = parse_id(group_id, "groupId")?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let group = repo::get_group(&state.pool, group_id)
-            .await
-            .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", crate::auth::Scope::Object(group_id)),
-                ("manage", scope_for_tenant(group.tenant_id)),
-            ],
-        )
-        .await?;
-        repo::add_group_member(&state.pool, group_id, entity_id)
-            .await
-            .map_err(gql_error)?;
-        Ok(true)
+        let result = async {
+            let group = repo::get_group(&state.pool, group_id).await?;
+            let tenant_id = group.tenant_id;
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", crate::auth::Scope::Object(group_id)),
+                    ("manage", scope_for_tenant(tenant_id)),
+                ],
+            )
+            .await?;
+            repo::add_group_member(&state.pool, group_id, entity_id).await?;
+            Ok(tenant_id)
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().copied().flatten(),
+                target_kind: "group",
+                target_id: Some(group_id),
+                event: "group_member.add",
+            },
+            serde_json::json!({ "entity_id": entity_id }),
+            &result,
+        );
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn remove_group_member(
@@ -550,22 +600,34 @@ impl GroupMutation {
         let state = ctx.data::<AppState>()?;
         let group_id = parse_id(group_id, "groupId")?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let group = repo::get_group(&state.pool, group_id)
-            .await
-            .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", crate::auth::Scope::Object(group_id)),
-                ("manage", scope_for_tenant(group.tenant_id)),
-            ],
-        )
-        .await?;
-        repo::remove_group_member(&state.pool, group_id, entity_id)
-            .await
-            .map_err(gql_error)?;
-        Ok(true)
+        let result = async {
+            let group = repo::get_group(&state.pool, group_id).await?;
+            let tenant_id = group.tenant_id;
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", crate::auth::Scope::Object(group_id)),
+                    ("manage", scope_for_tenant(tenant_id)),
+                ],
+            )
+            .await?;
+            repo::remove_group_member(&state.pool, group_id, entity_id).await?;
+            Ok(tenant_id)
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().copied().flatten(),
+                target_kind: "group",
+                target_id: Some(group_id),
+                event: "group_member.remove",
+            },
+            serde_json::json!({ "entity_id": entity_id }),
+            &result,
+        );
+        result.map(|_| true).map_err(gql_error)
     }
 }
 
@@ -579,31 +641,54 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, group.tenant_id).await?;
-        let group = repo::update_group(
-            &state.pool,
-            id,
-            UpdateGroup {
-                name: None,
-                description: None,
-                status: Some(status),
-                attributes: None,
+        let event = group_status_event(&status);
+        let status_detail = status.clone();
+        let result = async {
+            let group = repo::get_group(&state.pool, id).await?;
+            require_group_manage_app(&state.pool, auth.entity_id, id, group.tenant_id).await?;
+            repo::update_group(
+                &state.pool,
+                id,
+                UpdateGroup {
+                    name: None,
+                    description: None,
+                    status: Some(status),
+                    attributes: None,
+                },
+            )
+            .await
+        }
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
+                target_kind: "group",
+                target_id: Some(id),
+                event,
             },
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(group.into())
+            serde_json::json!({ "status": status_detail }),
+            &result,
+        );
+        result.map(Into::into).map_err(gql_error)
     }
 }
 
-async fn require_group_manage(
+fn group_status_event(status: &EntityStatus) -> &'static str {
+    match status {
+        EntityStatus::Active => "group.enable",
+        EntityStatus::Inactive => "group.disable",
+        EntityStatus::Suspended => "group.suspend",
+    }
+}
+
+async fn require_group_manage_app(
     pool: &sqlx::PgPool,
     actor_id: uuid::Uuid,
     group_id: uuid::Uuid,
     tenant_id: Option<uuid::Uuid>,
-) -> Result<()> {
-    require_any_capability(
+) -> std::result::Result<(), AppError> {
+    crate::auth::require_any_capability(
         pool,
         actor_id,
         &[

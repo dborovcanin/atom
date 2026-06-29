@@ -8,10 +8,7 @@ use crate::{
 };
 
 use super::{
-    auth::{
-        gql_error, require_any_capability, require_auth, require_list_access, require_read_access,
-        scope_for_tenant,
-    },
+    auth::{gql_error, require_auth, require_list_access, require_read_access, scope_for_tenant},
     types::{
         parse_id, parse_optional_id, CreateProfileInput, CreateProfileVersionInput, Profile,
         ProfileList, ProfileVersion, UpdateProfileInput,

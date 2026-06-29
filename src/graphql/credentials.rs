@@ -53,7 +53,7 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
-        service::create_password(&state.pool, entity_id, &password)
+        let credential_id = service::create_password(&state.pool, entity_id, &password)
             .await
             .map_err(gql_error)?;
         audit::write(
@@ -61,11 +61,14 @@ impl CredentialMutation {
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(entity_id),
+                target_kind: Some("credential"),
+                target_id: Some(credential_id),
                 event: "credential.create",
                 outcome: AuditOutcome::Allow,
-                details: serde_json::json!({"kind": "password"}),
+                details: serde_json::json!({
+                    "entity_id": entity_id,
+                    "kind": "password",
+                }),
             },
         )
         .await;
@@ -97,11 +100,12 @@ impl CredentialMutation {
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(entity_id),
+                target_kind: Some("credential"),
+                target_id: Some(response.credential_id),
                 event: "credential.create",
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
+                    "entity_id": entity_id,
                     "kind": "api_key",
                     "credential_id": response.credential_id
                 }),
