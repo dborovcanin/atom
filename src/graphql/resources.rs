@@ -186,7 +186,8 @@ impl ResourceMutation {
         )
         .await?;
 
-        let resource = authz_repo::create_resource(
+        let kind = input.kind.clone();
+        let result = authz_repo::create_resource(
             &state.pool,
             CreateResource {
                 id: parse_optional_id(input.id, "id")?,
@@ -198,10 +199,21 @@ impl ResourceMutation {
                 attributes: input.attributes.unwrap_or(serde_json::Value::Null),
             },
         )
-        .await
-        .map_err(gql_error)?;
+        .await;
 
-        Ok(resource.into())
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: "resource",
+                target_id: result.as_ref().ok().map(|r| r.id),
+                event: "resource.create",
+            },
+            serde_json::json!({ "kind": kind }),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn update_resource(
@@ -248,9 +260,7 @@ impl ResourceMutation {
                 target_id: Some(id),
                 event: "resource.update",
                 outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "updated_fields": updated_fields,
-                }),
+                details: serde_json::json!({ "updated_fields": updated_fields }),
             },
         )
         .await;

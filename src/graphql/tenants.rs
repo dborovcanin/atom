@@ -277,7 +277,7 @@ impl TenantMutation {
         )
         .await?;
 
-        let tenant = tenant_repo::create_tenant(
+        let result = tenant_repo::create_tenant(
             &state.pool,
             tenant_model::CreateTenant {
                 id: parse_optional_id(input.id, "id")?,
@@ -288,10 +288,22 @@ impl TenantMutation {
             },
             Some(auth.entity_id),
         )
-        .await
-        .map_err(gql_error)?;
+        .await;
 
-        Ok(tenant.into())
+        let tenant_id = result.as_ref().ok().map(|t| t.id);
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: "tenant",
+                target_id: tenant_id,
+                event: "tenant.create",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn update_tenant(
@@ -313,7 +325,7 @@ impl TenantMutation {
         )
         .await?;
 
-        let tenant = tenant_repo::update_tenant(
+        let result = tenant_repo::update_tenant(
             &state.pool,
             tenant_id,
             tenant_model::UpdateTenant {
@@ -324,10 +336,21 @@ impl TenantMutation {
             },
             Some(auth.entity_id),
         )
-        .await
-        .map_err(gql_error)?;
+        .await;
 
-        Ok(tenant.into())
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: Some(tenant_id),
+                target_kind: "tenant",
+                target_id: Some(tenant_id),
+                event: "tenant.update",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn delete_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
@@ -337,11 +360,23 @@ impl TenantMutation {
             .await
             .map_err(gql_error)?;
 
-        tenant_repo::soft_delete_tenant(&state.pool, parse_id(id, "id")?, Some(auth.entity_id))
-            .await
-            .map_err(gql_error)?;
+        let tenant_id = parse_id(id, "id")?;
+        let result =
+            tenant_repo::soft_delete_tenant(&state.pool, tenant_id, Some(auth.entity_id)).await;
 
-        Ok(true)
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: Some(tenant_id),
+                target_kind: "tenant",
+                target_id: Some(tenant_id),
+                event: "tenant.delete",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Restore a soft-deleted tenant within the retention window. Reactivates the

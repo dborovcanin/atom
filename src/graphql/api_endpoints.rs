@@ -4,6 +4,7 @@ use serde_json::json;
 use crate::{
     api_endpoints::repo as api_endpoint_repo,
     auth::has_global_manage,
+    error::AppError,
     models::api_endpoint::{
         CreateApiEndpoint, ListApiEndpointExecutions, ListApiEndpoints, UpdateApiEndpoint,
     },
@@ -106,32 +107,47 @@ impl ApiEndpointMutation {
     ) -> Result<ApiEndpoint> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
+        let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
+        let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
+        let result = async {
+            require_platform_manage_app(state, auth.entity_id).await?;
+            api_endpoint_repo::create_api_endpoint(
+                &state.pool,
+                CreateApiEndpoint {
+                    tenant_id,
+                    key: input.key,
+                    name: input.name,
+                    description: input.description,
+                    method: input.method,
+                    path: input.path,
+                    operation_kind: input.operation_kind,
+                    graphql: input.graphql,
+                    auth_mode: input.auth_mode,
+                    service_entity_id,
+                    variables_mapping: input.variables_mapping.unwrap_or_else(|| json!({})),
+                    request_schema: input.request_schema.unwrap_or_else(|| json!({})),
+                    response_mapping: input.response_mapping.unwrap_or_else(|| json!({})),
+                    status: input.status,
+                },
+                Some(auth.entity_id),
+            )
+            .await
+        }
+        .await;
 
-        let endpoint = api_endpoint_repo::create_api_endpoint(
-            &state.pool,
-            CreateApiEndpoint {
-                tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
-                key: input.key,
-                name: input.name,
-                description: input.description,
-                method: input.method,
-                path: input.path,
-                operation_kind: input.operation_kind,
-                graphql: input.graphql,
-                auth_mode: input.auth_mode,
-                service_entity_id: parse_optional_id(input.service_entity_id, "serviceEntityId")?,
-                variables_mapping: input.variables_mapping.unwrap_or_else(|| json!({})),
-                request_schema: input.request_schema.unwrap_or_else(|| json!({})),
-                response_mapping: input.response_mapping.unwrap_or_else(|| json!({})),
-                status: input.status,
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: "api_endpoint",
+                target_id: result.as_ref().ok().map(|e| e.id),
+                event: "api_endpoint.create",
             },
-            Some(auth.entity_id),
-        )
-        .await
-        .map_err(gql_error)?;
+            json!({}),
+            &result,
+        );
 
-        Ok(endpoint.into())
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn update_api_endpoint(
@@ -142,31 +158,47 @@ impl ApiEndpointMutation {
     ) -> Result<ApiEndpoint> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
-        let endpoint = api_endpoint_repo::update_api_endpoint(
-            &state.pool,
-            parse_id(id, "id")?,
-            UpdateApiEndpoint {
-                key: input.key,
-                name: input.name,
-                description: input.description,
-                method: input.method,
-                path: input.path,
-                operation_kind: input.operation_kind,
-                graphql: input.graphql,
-                auth_mode: input.auth_mode,
-                service_entity_id: parse_optional_id(input.service_entity_id, "serviceEntityId")?,
-                variables_mapping: input.variables_mapping,
-                request_schema: input.request_schema,
-                response_mapping: input.response_mapping,
-                status: input.status,
-            },
-            Some(auth.entity_id),
-        )
-        .await
-        .map_err(gql_error)?;
+        let endpoint_id = parse_id(id, "id")?;
+        let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
+        let result = async {
+            require_platform_manage_app(state, auth.entity_id).await?;
+            api_endpoint_repo::update_api_endpoint(
+                &state.pool,
+                endpoint_id,
+                UpdateApiEndpoint {
+                    key: input.key,
+                    name: input.name,
+                    description: input.description,
+                    method: input.method,
+                    path: input.path,
+                    operation_kind: input.operation_kind,
+                    graphql: input.graphql,
+                    auth_mode: input.auth_mode,
+                    service_entity_id,
+                    variables_mapping: input.variables_mapping,
+                    request_schema: input.request_schema,
+                    response_mapping: input.response_mapping,
+                    status: input.status,
+                },
+                Some(auth.entity_id),
+            )
+            .await
+        }
+        .await;
 
-        Ok(endpoint.into())
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                target_kind: "api_endpoint",
+                target_id: Some(endpoint_id),
+                event: "api_endpoint.update",
+            },
+            json!({}),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn enable_api_endpoint(&self, ctx: &Context<'_>, id: ID) -> Result<ApiEndpoint> {
@@ -199,12 +231,20 @@ impl ApiEndpointMutation {
 }
 
 async fn require_platform_manage(state: &AppState, entity_id: uuid::Uuid) -> Result<()> {
-    if has_global_manage(&state.pool, entity_id)
+    require_platform_manage_app(state, entity_id)
         .await
-        .map_err(gql_error)?
+        .map_err(gql_error)
+}
+
+async fn require_platform_manage_app(
+    state: &AppState,
+    entity_id: uuid::Uuid,
+) -> std::result::Result<(), AppError> {
+    if has_global_manage(&state.pool, entity_id)
+        .await?
     {
         Ok(())
     } else {
-        Err(async_graphql::Error::new("forbidden"))
+        Err(AppError::Forbidden)
     }
 }

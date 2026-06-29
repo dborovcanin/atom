@@ -296,7 +296,8 @@ impl GroupMutation {
         )
         .await?;
 
-        let group = repo::create_group(
+        let group_type = input.group_type.clone();
+        let result = repo::create_group(
             &state.pool,
             CreateGroup {
                 id: parse_optional_id(input.id, "id")?,
@@ -307,10 +308,21 @@ impl GroupMutation {
                 attributes: input.attributes.unwrap_or(serde_json::Value::Null),
             },
         )
-        .await
-        .map_err(gql_error)?;
+        .await;
 
-        Ok(group.into())
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: "group",
+                target_id: result.as_ref().ok().map(|g| g.id),
+                event: "group.create",
+            },
+            serde_json::json!({ "group_type": group_type }),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn create_object_group(
@@ -340,9 +352,9 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, group.tenant_id).await?;
-        let group = repo::update_group(
+        let existing = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
+        require_group_manage(&state.pool, auth.entity_id, id, existing.tenant_id).await?;
+        let result = repo::update_group(
             &state.pool,
             id,
             UpdateGroup {
@@ -352,9 +364,19 @@ impl GroupMutation {
                 attributes: input.attributes,
             },
         )
-        .await
-        .map_err(gql_error)?;
-        Ok(group.into())
+        .await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: existing.tenant_id,
+                target_kind: "group",
+                target_id: Some(id),
+                event: "group.update",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn enable_group(&self, ctx: &Context<'_>, id: ID) -> Result<Group> {
@@ -419,12 +441,21 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        require_group_manage(&state.pool, auth.entity_id, id, group.tenant_id).await?;
-        repo::delete_group(&state.pool, id, Some(auth.entity_id))
-            .await
-            .map_err(gql_error)?;
-        Ok(true)
+        let existing = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
+        require_group_manage(&state.pool, auth.entity_id, id, existing.tenant_id).await?;
+        let result = repo::delete_group(&state.pool, id, Some(auth.entity_id)).await;
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: existing.tenant_id,
+                target_kind: "group",
+                target_id: Some(id),
+                event: "group.delete",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Restore a soft-deleted group within the retention window. Platform-admin

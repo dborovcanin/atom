@@ -102,32 +102,45 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", scope_for_tenant(tenant_id)),
-                ("write", scope_for_tenant(tenant_id)),
-            ],
-        )
-        .await?;
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", scope_for_tenant(tenant_id)),
+                    ("write", scope_for_tenant(tenant_id)),
+                ],
+            )
+            .await?;
+            profile_repo::create_profile(
+                &state.pool,
+                CreateProfile {
+                    tenant_id,
+                    object_kind: input.object_kind,
+                    kind: input.kind,
+                    key: input.key,
+                    display_name: input.display_name,
+                    description: input.description,
+                    status: input.status,
+                },
+            )
+            .await
+        }
+        .await;
 
-        let profile = profile_repo::create_profile(
-            &state.pool,
-            CreateProfile {
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
                 tenant_id,
-                object_kind: input.object_kind,
-                kind: input.kind,
-                key: input.key,
-                display_name: input.display_name,
-                description: input.description,
-                status: input.status,
+                target_kind: "profile",
+                target_id: result.as_ref().ok().map(|p| p.id),
+                event: "profile.create",
             },
-        )
-        .await
-        .map_err(gql_error)?;
+            json!({}),
+            &result,
+        );
 
-        Ok(profile.into())
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn create_profile_version(
@@ -142,30 +155,43 @@ impl ProfileMutation {
         let profile = profile_repo::get_profile(&state.pool, profile_id)
             .await
             .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", scope_for_tenant(profile.tenant_id)),
-                ("write", scope_for_tenant(profile.tenant_id)),
-            ],
-        )
-        .await?;
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", scope_for_tenant(profile.tenant_id)),
+                    ("write", scope_for_tenant(profile.tenant_id)),
+                ],
+            )
+            .await?;
+            profile_repo::create_profile_version(
+                &state.pool,
+                profile_id,
+                CreateProfileVersion {
+                    version: input.version,
+                    json_schema: input.json_schema.unwrap_or_else(|| json!({})),
+                    ui_schema: input.ui_schema.unwrap_or_else(|| json!({})),
+                    status: input.status,
+                },
+            )
+            .await
+        }
+        .await;
 
-        let version = profile_repo::create_profile_version(
-            &state.pool,
-            profile_id,
-            CreateProfileVersion {
-                version: input.version,
-                json_schema: input.json_schema.unwrap_or_else(|| json!({})),
-                ui_schema: input.ui_schema.unwrap_or_else(|| json!({})),
-                status: input.status,
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: profile.tenant_id,
+                target_kind: "profile_version",
+                target_id: result.as_ref().ok().map(|v| v.id),
+                event: "profile_version.create",
             },
-        )
-        .await
-        .map_err(gql_error)?;
+            json!({ "profile_id": profile_id }),
+            &result,
+        );
 
-        Ok(version.into())
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn update_profile(
@@ -180,30 +206,44 @@ impl ProfileMutation {
         let existing = profile_repo::get_profile(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", scope_for_tenant(existing.tenant_id)),
-                ("write", scope_for_tenant(existing.tenant_id)),
-            ],
-        )
-        .await?;
         validate_profile_status(input.status.as_deref())?;
 
-        let profile = profile_repo::update_profile(
-            &state.pool,
-            id,
-            UpdateProfile {
-                display_name: input.display_name,
-                description: input.description,
-                status: input.status,
-            },
-        )
-        .await
-        .map_err(gql_error)?;
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", scope_for_tenant(existing.tenant_id)),
+                    ("write", scope_for_tenant(existing.tenant_id)),
+                ],
+            )
+            .await?;
+            profile_repo::update_profile(
+                &state.pool,
+                id,
+                UpdateProfile {
+                    display_name: input.display_name,
+                    description: input.description,
+                    status: input.status,
+                },
+            )
+            .await
+        }
+        .await;
 
-        Ok(profile.into())
+        crate::audit::observe_result(
+            crate::audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: existing.tenant_id,
+                target_kind: "profile",
+                target_id: Some(id),
+                event: "profile.update",
+            },
+            json!({}),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 }
 

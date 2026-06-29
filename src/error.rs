@@ -34,6 +34,16 @@ pub enum AppError {
 
 #[allow(dead_code)]
 impl AppError {
+    /// Audit outcome for a failed operation. Authorization failures are `Deny`;
+    /// everything else (validation, conflict, DB, internal) is a system `Error`.
+    pub fn audit_outcome(&self) -> crate::models::enums::AuditOutcome {
+        use crate::models::enums::AuditOutcome;
+        match self {
+            AppError::Unauthorized(_) | AppError::Forbidden => AuditOutcome::Deny,
+            _ => AuditOutcome::Error,
+        }
+    }
+
     pub fn not_found(what: impl Into<String>) -> Self {
         AppError::NotFound(what.into())
     }

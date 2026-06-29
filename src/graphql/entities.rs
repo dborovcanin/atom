@@ -208,7 +208,7 @@ impl EntityMutation {
         )
         .await?;
 
-        let entity = repo::create_entity(
+        let result = repo::create_entity(
             &state.pool,
             entity_model::CreateEntity {
                 id: parse_optional_id(input.id, "id")?,
@@ -224,10 +224,21 @@ impl EntityMutation {
                 attributes: input.attributes,
             },
         )
-        .await
-        .map_err(gql_error)?;
+        .await;
 
-        Ok(entity.into())
+        audit::observe_result(
+            audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: "entity",
+                target_id: result.as_ref().ok().map(|e| e.id),
+                event: "entity.create",
+            },
+            serde_json::json!({}),
+            &result,
+        );
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     async fn update_entity(
@@ -283,9 +294,7 @@ impl EntityMutation {
                 target_id: Some(id),
                 event: "entity.update",
                 outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "updated_fields": updated_fields,
-                }),
+                details: serde_json::json!({ "updated_fields": updated_fields }),
             },
         )
         .await;
