@@ -107,7 +107,16 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_tenant_read_access(state, auth.entity_id, tenant_id).await?;
+        require_any_capability(
+            &state.pool,
+            auth.entity_id,
+            &[
+                ("manage", Scope::Tenant(tenant_id)),
+                ("role.manage", Scope::Tenant(tenant_id)),
+                ("policy.manage", Scope::Tenant(tenant_id)),
+            ],
+        )
+        .await?;
         let list = tenant_repo::list_tenant_members(
             &state.pool,
             tenant_id,
@@ -177,7 +186,15 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_tenant_read_access(state, auth.entity_id, tenant_id).await?;
+        require_any_capability(
+            &state.pool,
+            auth.entity_id,
+            &[
+                ("manage", Scope::Tenant(tenant_id)),
+                ("policy.manage", Scope::Tenant(tenant_id)),
+            ],
+        )
+        .await?;
         let list = tenant_repo::list_tenant_invitations(
             &state.pool,
             tenant_id,

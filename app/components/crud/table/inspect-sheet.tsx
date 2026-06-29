@@ -17,6 +17,7 @@ import { ResourceInspectDetails } from "@/components/resources/resource-inspect-
 import { RoleInspectDetails } from "@/components/roles/role-inspect-details";
 import { RolePermissionBlocksPanel } from "@/components/roles/role-permission-blocks-panel";
 import { RolePrincipalsPanel } from "@/components/roles/role-principals-panel";
+import { TenantMembersPanel } from "@/components/tenants/tenant-members-panel";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -85,6 +86,24 @@ function InspectBody({
   }
   if (resourceKey === "profiles") {
     return <ProfileInspectDetails row={inspected} />;
+  }
+  if (resourceKey === "tenants") {
+    return (
+      <Tabs defaultValue="details">
+        <TabsList className="mb-4">
+          <TabsTrigger value="details">Details</TabsTrigger>
+          <TabsTrigger value="members">Members</TabsTrigger>
+        </TabsList>
+        <TabsContent value="details" className="grid gap-3">
+          <DetailFields row={inspected} />
+        </TabsContent>
+        <TabsContent value="members">
+          {inspected?.id ? (
+            <TenantMembersPanel tenantId={String(inspected.id)} />
+          ) : null}
+        </TabsContent>
+      </Tabs>
+    );
   }
   if (resourceKey === "entities") {
     return (

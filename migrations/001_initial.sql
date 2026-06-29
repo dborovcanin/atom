@@ -705,10 +705,11 @@ SELECT
     END AS scope_ref
 FROM permission_blocks pb;
 
--- Single subject grant expansion: direct policies and role-linked permission
--- blocks for one subject, principal-group membership resolved recursively. Each
--- row is one fully expanded grant carrying its block's own scope/effect/
--- conditions and the assignment-level tenant boundary.
+-- Single subject grant expansion: direct policies, role-linked permission
+-- blocks, and active tenant-membership tenant visibility for one subject,
+-- principal-group membership resolved recursively. Each row is one fully
+-- expanded grant carrying its block's own scope/effect/conditions and the
+-- assignment-level tenant boundary.
 CREATE FUNCTION subject_effective_grants(p_entity_id UUID)
 RETURNS TABLE(
     assignment_id   UUID,
@@ -776,6 +777,41 @@ AS $$
     LEFT JOIN subject_groups sg ON ra.subject_kind = 'group' AND sg.group_id = ra.subject_id
     WHERE (ra.subject_kind = 'entity' AND ra.subject_id = p_entity_id)
        OR (ra.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+    UNION ALL
+    SELECT (
+               substr(md5('tenant_membership_assignment:' || tm.tenant_id::text || ':' || tm.entity_id::text), 1, 8) || '-' ||
+               substr(md5('tenant_membership_assignment:' || tm.tenant_id::text || ':' || tm.entity_id::text), 9, 4) || '-' ||
+               substr(md5('tenant_membership_assignment:' || tm.tenant_id::text || ':' || tm.entity_id::text), 13, 4) || '-' ||
+               substr(md5('tenant_membership_assignment:' || tm.tenant_id::text || ':' || tm.entity_id::text), 17, 4) || '-' ||
+               substr(md5('tenant_membership_assignment:' || tm.tenant_id::text || ':' || tm.entity_id::text), 21, 12)
+           )::uuid AS assignment_id,
+           (
+               substr(md5('tenant_membership_block:' || tm.tenant_id::text || ':' || tm.entity_id::text), 1, 8) || '-' ||
+               substr(md5('tenant_membership_block:' || tm.tenant_id::text || ':' || tm.entity_id::text), 9, 4) || '-' ||
+               substr(md5('tenant_membership_block:' || tm.tenant_id::text || ':' || tm.entity_id::text), 13, 4) || '-' ||
+               substr(md5('tenant_membership_block:' || tm.tenant_id::text || ':' || tm.entity_id::text), 17, 4) || '-' ||
+               substr(md5('tenant_membership_block:' || tm.tenant_id::text || ':' || tm.entity_id::text), 21, 12)
+           )::uuid AS block_id,
+           NULL::uuid AS role_id,
+           NULL::text AS role_name,
+           'tenant_membership' AS via,
+           tm.tenant_id AS tenant_boundary,
+           'object' AS scope_kind,
+           tm.tenant_id::text AS scope_ref,
+           a.id AS capability_id,
+           'allow' AS effect,
+           '{}'::jsonb AS conditions
+    FROM tenant_memberships tm
+    JOIN entities e ON e.id = tm.entity_id
+    JOIN tenants t ON t.id = tm.tenant_id
+    JOIN actions a ON a.name = 'read'
+    WHERE tm.entity_id = p_entity_id
+      AND tm.status = 'active'
+      AND e.kind = 'human'
+      AND e.status = 'active'
+      AND e.deleted_at IS NULL
+      AND t.status = 'active'
+      AND t.deleted_at IS NULL
 $$;
 
 -- Single scope predicate: whether a grant's (scope_kind, scope_ref) covers a

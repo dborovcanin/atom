@@ -46,6 +46,18 @@ async fn make_human(pool: &sqlx::PgPool, tenant_id: Option<Uuid>) -> Uuid {
     id
 }
 
+async fn make_channel(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
+        .bind(id)
+        .bind(format!("m19-channel-{id}"))
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("insert channel");
+    id
+}
+
 async fn read_id(pool: &sqlx::PgPool) -> Uuid {
     sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
         .fetch_one(pool)
@@ -126,6 +138,146 @@ async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
     .into_iter()
     .map(|t| t.id)
     .collect()
+}
+
+async fn add_membership(pool: &sqlx::PgPool, tenant_id: Uuid, entity_id: Uuid, status: &str) {
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, entity_id, status)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, entity_id) DO UPDATE SET status = EXCLUDED.status",
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .bind(status)
+    .execute(pool)
+    .await
+    .expect("upsert tenant membership");
+}
+
+/// Active tenant membership alone grants the minimal right to see and read the
+/// tenant object. It must not require a role/policy block because tenant
+/// membership is itself the domain-entry signal used by UI callers.
+#[tokio::test]
+#[ignore]
+async fn active_membership_lists_and_reads_tenant() {
+    let p = pool().await;
+    let target = make_tenant(&p).await;
+    let caller = make_human(&p, None).await;
+    let channel = make_channel(&p, target).await;
+
+    add_membership(&p, target, caller, "active").await;
+
+    assert!(
+        visible_tenant_ids(&p, caller).await.contains(&target),
+        "an active tenant membership must list the tenant"
+    );
+    assert!(
+        atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+            .await
+            .expect("tenant read check"),
+        "an active tenant membership must authorize tenant read"
+    );
+    assert!(
+        !atom::authz::engine::allows_any(&p, caller, "resource", channel, &["read"])
+            .await
+            .expect("resource read check"),
+        "tenant membership read must not authorize reading resources inside the tenant"
+    );
+}
+
+/// Only active memberships should produce the implicit tenant-read grant.
+#[tokio::test]
+#[ignore]
+async fn inactive_membership_statuses_do_not_list_tenant() {
+    let p = pool().await;
+    let caller = make_human(&p, None).await;
+
+    for status in ["invited", "suspended", "left"] {
+        let target = make_tenant(&p).await;
+        add_membership(&p, target, caller, status).await;
+
+        assert!(
+            !visible_tenant_ids(&p, caller).await.contains(&target),
+            "a {status} tenant membership must not list the tenant"
+        );
+        assert!(
+            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+                .await
+                .expect("tenant read check"),
+            "a {status} tenant membership must not authorize tenant read"
+        );
+    }
+}
+
+/// The membership-derived read grant participates in the same deny-overrides
+/// model as normal grants: an explicit tenant read deny must still hide the
+/// tenant from listing and deny tenant read.
+#[tokio::test]
+#[ignore]
+async fn explicit_tenant_read_deny_overrides_membership_visibility() {
+    let p = pool().await;
+    let target = make_tenant(&p).await;
+    let caller = make_human(&p, None).await;
+
+    add_membership(&p, target, caller, "active").await;
+    direct_block(
+        &p,
+        target,
+        caller,
+        "tenant",
+        None,
+        "deny",
+        read_id(&p).await,
+    )
+    .await;
+
+    assert!(
+        !visible_tenant_ids(&p, caller).await.contains(&target),
+        "an explicit read deny must hide a membership-visible tenant"
+    );
+    assert!(
+        !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+            .await
+            .expect("tenant read check"),
+        "an explicit read deny must override membership tenant read"
+    );
+}
+
+/// A membership-derived grant must also disappear when the tenant lifecycle no
+/// longer permits reads.
+#[tokio::test]
+#[ignore]
+async fn membership_does_not_list_non_active_tenant() {
+    let p = pool().await;
+    let caller = make_human(&p, None).await;
+
+    for status in ["frozen", "inactive", "deleted"] {
+        let target = make_tenant(&p).await;
+        add_membership(&p, target, caller, "active").await;
+
+        assert!(
+            visible_tenant_ids(&p, caller).await.contains(&target),
+            "an active tenant with active membership must be listed"
+        );
+
+        sqlx::query("UPDATE tenants SET status = $2 WHERE id = $1")
+            .bind(target)
+            .bind(status)
+            .execute(&p)
+            .await
+            .expect("set tenant status");
+
+        assert!(
+            !visible_tenant_ids(&p, caller).await.contains(&target),
+            "a {status} tenant must not appear through membership"
+        );
+        assert!(
+            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+                .await
+                .expect("tenant read check"),
+            "a {status} tenant must not be readable through membership"
+        );
+    }
 }
 
 /// A role-linked deny on a tenant must hide it, even with a tenant-wide read

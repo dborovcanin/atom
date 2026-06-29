@@ -4991,7 +4991,7 @@ pub async fn effective_grants_for_subject(
 ) -> Result<Vec<EffectiveGrant>, AppError> {
     use sqlx::Row;
     // Canonical grant expansion lives in the `subject_effective_grants` SQL
-    // function (migration 001), shared by this PDP path and every authorized
+    // function, shared by this PDP path and every authorized
     // listing reader so scope/effect/conditions semantics cannot drift.
     let rows = sqlx::query(
         r#"SELECT assignment_id, block_id, role_id, role_name, via, tenant_boundary,

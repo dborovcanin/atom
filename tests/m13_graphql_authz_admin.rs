@@ -128,6 +128,18 @@ async fn tenant(pool: &PgPool) -> Uuid {
     id
 }
 
+async fn add_tenant_membership(pool: &PgPool, tenant_id: Uuid, entity_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, entity_id, status)
+         VALUES ($1, $2, 'active')",
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .execute(pool)
+    .await
+    .expect("insert tenant membership");
+}
+
 async fn tenant_entity(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
@@ -1159,4 +1171,99 @@ async fn graphql_tenant_read_matches_listing_object_kind_grant() {
         fetched_data["tenant"]["id"],
         serde_json::json!(tenant_id.to_string())
     );
+}
+
+/// A plain active tenant member can see and read the tenant, but membership does
+/// not expose tenant administration surfaces such as member or invitation lists.
+#[tokio::test]
+#[ignore]
+async fn graphql_membership_reads_tenant_without_admin_lists() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+    let member = entity(&pool, "human").await;
+    add_tenant_membership(&pool, tenant_id, member).await;
+    let schema = build_schema(state(pool));
+
+    let listed = schema
+        .execute(authed_as(
+            member,
+            r#"
+            {
+              tenants {
+                items { id }
+                total
+              }
+            }
+            "#,
+        ))
+        .await;
+    assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+    let listed_data = listed.data.into_json().expect("json");
+    assert!(listed_data["tenants"]["items"]
+        .as_array()
+        .expect("tenant items")
+        .iter()
+        .any(|item| item["id"] == serde_json::json!(tenant_id.to_string())));
+
+    let fetched = schema
+        .execute(authed_as(
+            member,
+            format!("{{ tenant(id: \"{tenant_id}\") {{ id }} }}"),
+        ))
+        .await;
+    assert!(fetched.errors.is_empty(), "{:?}", fetched.errors);
+    assert_eq!(
+        fetched.data.into_json().expect("json")["tenant"]["id"],
+        serde_json::json!(tenant_id.to_string())
+    );
+
+    let checked = schema
+        .execute(authed_as(
+            member,
+            format!(
+                r#"
+                mutation {{
+                  authzCheck(input: {{
+                    subjectId: "{member}",
+                    action: "read",
+                    objectKind: "tenant",
+                    objectId: "{tenant_id}"
+                  }}) {{
+                    allowed
+                    reason
+                  }}
+                }}
+                "#
+            ),
+        ))
+        .await;
+    assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+    assert_eq!(
+        checked.data.into_json().expect("json")["authzCheck"]["allowed"],
+        true
+    );
+
+    let members = schema
+        .execute(authed_as(
+            member,
+            format!("{{ tenantMembers(tenantId: \"{tenant_id}\") {{ total }} }}"),
+        ))
+        .await;
+    assert!(
+        !members.errors.is_empty(),
+        "plain membership must not allow tenantMembers"
+    );
+    assert!(members.errors[0].message.contains("forbidden"));
+
+    let invitations = schema
+        .execute(authed_as(
+            member,
+            format!("{{ tenantInvitations(tenantId: \"{tenant_id}\") {{ total }} }}"),
+        ))
+        .await;
+    assert!(
+        !invitations.errors.is_empty(),
+        "plain membership must not allow tenantInvitations"
+    );
+    assert!(invitations.errors[0].message.contains("forbidden"));
 }
