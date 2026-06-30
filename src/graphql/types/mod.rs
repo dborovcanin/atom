@@ -1511,7 +1511,7 @@ pub struct CreateEntityInput {
     pub name: String,
     pub alias: Option<String>,
     pub tenant_id: Option<ID>,
-    pub attributes: Value,
+    pub attributes: Option<Value>,
 }
 
 #[derive(InputObject)]

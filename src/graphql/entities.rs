@@ -222,7 +222,7 @@ impl EntityMutation {
                     name: input.name,
                     alias: input.alias,
                     tenant_id,
-                    attributes: input.attributes,
+                    attributes: input.attributes.unwrap_or_default(),
                 },
             )
             .await
@@ -563,7 +563,6 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
     let state = ctx.data::<AppState>()?;
     let entity_id = parse_id(id, "id")?;
     let event = entity_status_event(&status);
-    let status_detail = status.clone();
     let existing = repo::get_entity(&state.pool, entity_id)
         .await
         .map_err(gql_error)?;
@@ -601,9 +600,7 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
             target_id: Some(entity_id),
             event,
             outcome: AuditOutcome::Allow,
-            details: serde_json::json!({
-                "status": status_detail,
-            }),
+            details: serde_json::json!({}),
         },
     )
     .await;
